@@ -1,0 +1,36 @@
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# ---- Python virtual environments ----
+ir_env/
+venv/
+.venv/
+env/
+
+# ---- Python cache / build ----
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- VS Code ----
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+
+# ---- Logs / temp ----
+*.log
+*.tmp
+
+# ---- Secrets ----
+.env
