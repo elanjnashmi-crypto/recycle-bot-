@@ -11,6 +11,7 @@ from ir_support.robots.DHRobot3D import DHRobot3D
 
 WHITE = (0.95, 0.95, 0.95, 1.0)
 BLACK = (0.10, 0.10, 0.10, 1.0)
+GREEN = (0.00, 0.55, 0.30, 1.0)
 
 
 class RS007L(DHRobot3D):
