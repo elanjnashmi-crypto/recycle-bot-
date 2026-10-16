@@ -166,7 +166,7 @@ class SortingCell:
         r, h, m, al, colour = METAL_ITEMS[kind]
         p = self.belt.start + self.belt.dir * s
         shape = Cylinder(r, h, pose=SE3(p[0], p[1], BELT_HEIGHT + h / 2), color=colour)
-        self.env.add(shape)
+        self.world.add(shape)       # thread-safe: other station may be stepping Swift
         item = Item(shape, kind, r, h, m, al)
         self.items.append(item)
         self.world.add_active(shape)

@@ -26,17 +26,20 @@ import swift
 from world import World
 from infeed_cell import InfeedCell
 from yaskawa_cell import SortingCell
+from ur3e_cell import UR3eCell
 # from fanuc_cell import ClassifyCell   # add once that teammate's station exists
 
 DT = 0.05
 
 
-def run_station(station):
+def run_station(station, world):
     try:
         station.run()
     except Exception:                 # keep one station's crash from killing the whole sim
         print(f"[{type(station).__name__}] stopped with an exception:")
         traceback.print_exc()
+    finally:
+        world.unregister()            # don't leave the other stations waiting on a dead one
 
 
 def main():
@@ -47,10 +50,13 @@ def main():
 
     infeed = InfeedCell(world)
     sorter = SortingCell(world)
+    ur3e = UR3eCell(world)
     # classifier = ClassifyCell(world)
 
-    stations = [infeed, sorter]
-    threads = [threading.Thread(target=run_station, args=(s,), daemon=True) for s in stations]
+    stations = [infeed, sorter, ur3e]
+    for _ in stations:
+        world.register()              # all registered BEFORE any thread starts, so rounds wait for everyone
+    threads = [threading.Thread(target=run_station, args=(s, world), daemon=True) for s in stations]
     for t in threads:
         t.start()
 
