@@ -1,14 +1,22 @@
 """
-Aluminium sorting cell at the end of the metal line. Run from the A2 folder:
-    python yaskawa_cell.py
+Aluminium sorting cell at the end of the metal line -- Dom's station.
 
 Metal items ride metal_return up to its end stop. The Yaskawa GP7 picks each
 one, weighs it with the load cell in its wrist, and drops it in the Al or
 Non-Al deposit box behind it. Aluminium is about a third the density of steel,
 so for same-sized cans weight alone separates them.
-"""
-#Dom's working cell on the conveyor line.
 
+Can run standalone for development:
+    python yaskawa_cell.py
+or be plugged into the shared workcell via main_sim.py by passing in a
+shared World instead of letting it build its own.
+
+NOTE: until the FANUC classify station exists, this cell spawns its own
+test items directly onto metal_return (see _spawn). Once that station is
+wired in, delete _spawn/_next_spawn/_movable_items's self-spawn path and
+this cell will instead pick up whatever the FANUC station places on
+metal_return via world.active_items.
+"""
 from dataclasses import dataclass
 
 import numpy as np
@@ -16,7 +24,8 @@ import swift
 from spatialmath import SE3
 from spatialgeometry import Cuboid, Cylinder
 
-from conveyors import ConveyorSystem, BELT_HEIGHT
+from conveyors import BELT_HEIGHT
+from world import World
 from yaskawa_gp7.yaskawa import GP7, FINGER_OPEN, FINGER_LEN
 
 DT = 0.05
@@ -32,7 +41,7 @@ LOAD_CELL_NOISE_KG = 0.002
 
 APPROACH = 0.15                         # clearance above items / bins for approach moves
 ITEM_GAP = 0.15                         # items queue this far apart behind the end stop
-SPAWN_PERIOD = 9.0                      # s between new items
+SPAWN_PERIOD = 9.0                      # s between new test items (placeholder spawner, see NOTE above)
 SPAWN_BEFORE_END = 1.2                  # m before the end stop that new items appear
 
 # name: (radius, height, mass kg, aluminium?, colour)
@@ -111,23 +120,23 @@ class LoadCell:
 
 
 class SortingCell:
-    def __init__(self, env):
-        self.env = env
-        self.conveyors = ConveyorSystem(env)
-        self.belt = self.conveyors["metal_return"]
+    def __init__(self, world: World):
+        self.world = world
+        self.env = world.env
+        self.belt = world.conveyors["metal_return"]
 
         b = YASKAWA_BASE.t
-        env.add(Cuboid([0.35, 0.35, PEDESTAL_HEIGHT], pose=SE3(b[0], b[1], PEDESTAL_HEIGHT / 2),
-                       color=(0.35, 0.35, 0.38, 1)))
+        self.env.add(Cuboid([0.35, 0.35, PEDESTAL_HEIGHT], pose=SE3(b[0], b[1], PEDESTAL_HEIGHT / 2),
+                            color=(0.35, 0.35, 0.38, 1)))
         self.robot = GP7(base=YASKAWA_BASE)
-        self.robot.add_to_env(env)
+        self.robot.add_to_env(self.env)
         self.bins = {
-            True: DepositBin(env, AL_BIN_XY, colour=(0.20, 0.45, 0.80, 1)),
-            False: DepositBin(env, NON_AL_BIN_XY, colour=(0.85, 0.45, 0.10, 1)),
+            True: DepositBin(self.env, AL_BIN_XY, colour=(0.20, 0.45, 0.80, 1)),
+            False: DepositBin(self.env, NON_AL_BIN_XY, colour=(0.85, 0.45, 0.10, 1)),
         }
         self.load_cell = LoadCell()
 
-        self.items = []             # items still on the belts
+        self.items = []             # items this station is tracking (spawned or picked)
         self.t = 0.0
         self._next_spawn = 0.0
         self.rng = np.random.default_rng()
@@ -140,12 +149,13 @@ class SortingCell:
 
     # ---------- world ----------
     def step(self):
-        """Advance the whole cell one time step (belts, items, spawner, Swift)."""
+        """Per-substep callback handed to GP7's move_* helpers. Advances the
+        SHARED world clock (conveyors + render) rather than owning its own,
+        so this station stays in sync with whatever else is on the belts."""
         self.t += DT
         if self.t >= self._next_spawn:
-            self._spawn()
-        self.conveyors.step(DT, self._movable_items())
-        self.env.step(DT)
+            self._spawn()   # TODO: remove once the FANUC classify station feeds metal_return for real
+        self.world.tick()
 
     def _spawn(self):
         s = self.belt.length - SPAWN_BEFORE_END
@@ -157,18 +167,10 @@ class SortingCell:
         p = self.belt.start + self.belt.dir * s
         shape = Cylinder(r, h, pose=SE3(p[0], p[1], BELT_HEIGHT + h / 2), color=colour)
         self.env.add(shape)
-        self.items.append(Item(shape, kind, r, h, m, al))
+        item = Item(shape, kind, r, h, m, al)
+        self.items.append(item)
+        self.world.add_active(shape)
         self._next_spawn = self.t + SPAWN_PERIOD
-
-    def _movable_items(self):
-        """Items on metal_return wait while the one in front is within ITEM_GAP."""
-        on_belt = sorted((i for i in self.items if self.belt.contains(i.pos)),
-                         key=lambda i: self.belt.progress(i.pos), reverse=True)
-        held = set()
-        for ahead, behind in zip(on_belt, on_belt[1:]):
-            if self.belt.progress(ahead.pos) - self.belt.progress(behind.pos) < ITEM_GAP:
-                held.add(id(behind))
-        return [i.shape for i in self.items if id(i) not in held]
 
     def _item_at_pick(self):
         stop = self.belt.length - 0.1
@@ -198,6 +200,7 @@ class SortingCell:
         r.set_gripper(item.radius, self.step, DT)
         r.grasp(item.shape)
         self.items.remove(item)
+        self.world.remove_active(item.shape)   # now held by the gripper, not belt-driven
         r.move_line(above, self.step, DT)
 
         mass = self.load_cell.read(item)
@@ -224,4 +227,4 @@ class SortingCell:
 if __name__ == "__main__":
     env = swift.Swift()
     env.launch(realtime=True)
-    SortingCell(env).run()
+    SortingCell(World(env, dt=DT)).run()
