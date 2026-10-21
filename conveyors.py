@@ -30,13 +30,15 @@ DEFAULT_SPEED = 0.15    # m/s
 # under the end of the feeding belt; where they overlap, the later
 # (downstream) belt takes over the item.
 # name: (start_xy, end_xy) -- items flow from start to end.
+# The cross line and the plastic/metal line starts sit within the FANUC LR Mate
+# 200iD's 717 mm reach (datasheet) of its stand at the origin -- see fanuc_cell.py.
 LAYOUT = {
-    "main_line":    ((-0.30,  3.40), (-0.30,  0.75)),  # Kawasaki places items here
-    "cross_line":   (( 0.60,  0.75), (-2.00,  0.75)),  # FANUC picks plastic/metal from here
-    "general_line": ((-2.00,  0.95), (-2.00, -2.60)),  # whatever FANUC leaves -> general deposit
-    "plastic_line": ((-0.90,  0.20), (-0.90, -2.60)),  # FANUC places plastic
-    "metal_line":   (( 0.90,  0.20), ( 0.90, -2.90)),  # FANUC places metal
-    "metal_bottom": (( 0.70, -2.90), ( 2.50, -2.90)),  # carries metal right
+    "main_line":    ((-0.10,  3.40), (-0.10,  0.50)),  # Kawasaki places items here
+    "cross_line":   (( 0.60,  0.50), (-2.00,  0.50)),  # FANUC picks plastic/metal from here
+    "general_line": ((-2.00,  0.70), (-2.00, -2.60)),  # whatever FANUC leaves -> general deposit
+    "plastic_line": ((-0.50,  0.18), (-0.50, -2.60)),  # FANUC places plastic
+    "metal_line":   (( 0.50,  0.18), ( 0.50, -2.90)),  # FANUC places metal
+    "metal_bottom": (( 0.30, -2.90), ( 2.50, -2.90)),  # carries metal right
     "metal_return": (( 2.50, -3.10), ( 2.50,  1.80)),  # up to the Al / non-Al sorting robot
 }
 
@@ -44,12 +46,54 @@ LAYOUT = {
 # instead of letting them run off.
 END_STOPS = {"general_line", "plastic_line", "metal_return"}
 
+RAIL_W = 0.03           # side rail thickness
+
+
+def _junctions(layout, width=DEFAULT_WIDTH):
+    """Where one belt feeds another, work out how the two should be DRAWN so
+    they don't overlap: the feeding belt stops at the receiving belt's side
+    rail, and the receiving belt's rail gets an opening where items come in.
+
+    Only drawing changes -- each belt still *carries* items all the way to its
+    LAYOUT end point, so items are pushed onto the next belt exactly as before.
+    Returns {name: (draw_length, {side: [(s_from, s_to), ...]})}.
+    """
+    belts = {}
+    for name, (a, b) in layout.items():
+        a, b = np.array(a, float), np.array(b, float)
+        L = float(np.linalg.norm(b - a))
+        d = (b - a) / L
+        belts[name] = dict(start=a, end=b, L=L, dir=d, lat=np.array([-d[1], d[0]]))
+
+    def inside(bt, p, margin):
+        rel = p - bt["start"]
+        return -margin <= rel @ bt["dir"] <= bt["L"] + margin and abs(rel @ bt["lat"]) <= width / 2 + margin
+
+    out = {name: [bt["L"], {+1: [], -1: []}] for name, bt in belts.items()}
+    names = list(belts)
+    for i, feeder in enumerate(names):
+        f = belts[feeder]
+        for receiver in names[i + 1:]:                      # downstream belts only
+            r = belts[receiver]
+            if not inside(r, f["end"], 0.0):
+                continue
+            t = 0.0                                          # pull the feeder's end back out of the receiver
+            while t < f["L"] and inside(r, f["end"] - t * f["dir"], RAIL_W):
+                t += 0.005
+            out[feeder][0] = f["L"] - t
+            side = 1 if (f["end"] - t * f["dir"] - r["start"]) @ r["lat"] > 0 else -1
+            s_mid = (f["end"] - r["start"]) @ r["dir"]
+            half = width / 2 + RAIL_W
+            out[receiver][1][side].append((s_mid - half, s_mid + half))
+            break
+    return {name: (L, gaps) for name, (L, gaps) in out.items()}
+
 
 class Conveyor:
     """One straight belt: frame, legs, side rails and moving stripes."""
 
     def __init__(self, env, name, start, end, width=DEFAULT_WIDTH,
-                 speed=DEFAULT_SPEED, stop_at_end=False):
+                 speed=DEFAULT_SPEED, stop_at_end=False, draw_length=None, rail_gaps=None):
         self.name = name
         self.start = np.array([start[0], start[1], BELT_HEIGHT], dtype=float)
         self.end = np.array([end[0], end[1], BELT_HEIGHT], dtype=float)
@@ -60,6 +104,11 @@ class Conveyor:
         self.speed = speed
         self.stop_at_end = stop_at_end
         self.yaw = np.arctan2(self.dir[1], self.dir[0])
+        # Drawn length can be shorter than the carrying length where this belt
+        # feeds onto another one (see _junctions); rail_gaps open the side rail
+        # where another belt feeds in.
+        self.draw_length = self.length if draw_length is None else draw_length
+        self.rail_gaps = rail_gaps or {+1: [], -1: []}
         self._stripe_offset = 0.0
         self._build(env)
 
@@ -69,8 +118,19 @@ class Conveyor:
         p = self.start + s * self.dir + lateral * self.lateral
         return SE3(p[0], p[1], z) * SE3.Rz(self.yaw)
 
+    def _rail_segments(self, side):
+        """[s_from, s_to] pieces of a side rail, skipping any openings."""
+        segs, s0 = [], 0.0
+        for a, b in sorted(self.rail_gaps[side]):
+            if a > s0:
+                segs.append((s0, min(a, self.draw_length)))
+            s0 = max(s0, b)
+        if s0 < self.draw_length:
+            segs.append((s0, self.draw_length))
+        return [(a, b) for a, b in segs if b - a > 0.01]
+
     def _build(self, env):
-        L, w = self.length, self.width
+        L, w = self.draw_length, self.width
         mid = L / 2
 
         # belt surface
@@ -81,10 +141,11 @@ class Conveyor:
 
         # side rails (raised so items can't slide off sideways)
         for side in (+1, -1):
-            rail = Cuboid([L, 0.03, 0.08],
-                          pose=self._pose(mid, side * (w / 2 + 0.015), BELT_HEIGHT),
-                          color=[0.6, 0.6, 0.65, 1])
-            env.add(rail)
+            for a, b in self._rail_segments(side):
+                rail = Cuboid([b - a, RAIL_W, 0.08],
+                              pose=self._pose((a + b) / 2, side * (w / 2 + RAIL_W / 2), BELT_HEIGHT),
+                              color=[0.6, 0.6, 0.65, 1])
+                env.add(rail)
 
         # legs every ~1 m
         n_legs = max(2, int(np.ceil(L / 1.0)) + 1)
@@ -136,7 +197,7 @@ class Conveyor:
     def animate(self, dt):
         self._stripe_offset = (self._stripe_offset + self.speed * dt) % self.stripe_spacing
         for i, stripe in enumerate(self.stripes):
-            s = (i * self.stripe_spacing + self._stripe_offset) % self.length
+            s = (i * self.stripe_spacing + self._stripe_offset) % self.draw_length
             stripe.T = self._pose(s, z=BELT_HEIGHT + 0.001).A
 
 
@@ -144,8 +205,10 @@ class ConveyorSystem:
     """All belts in LAYOUT, with one running flag for e-stop / light-curtain stops."""
 
     def __init__(self, env, layout=LAYOUT, speed=DEFAULT_SPEED):
+        joins = _junctions(layout)
         self.conveyors = [
-            Conveyor(env, name, start, end, speed=speed, stop_at_end=name in END_STOPS)
+            Conveyor(env, name, start, end, speed=speed, stop_at_end=name in END_STOPS,
+                     draw_length=joins[name][0], rail_gaps=joins[name][1])
             for name, (start, end) in layout.items()
         ]
         self.by_name = {c.name: c for c in self.conveyors}

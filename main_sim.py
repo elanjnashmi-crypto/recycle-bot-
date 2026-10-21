@@ -18,6 +18,17 @@ advance a bit faster than DT alone suggests when two robots are mid-move at
 the same wall-clock moment. Fine for a visual demo; replace with a
 fixed-rate scheduler thread if exact timing ever matters.
 """
+import sys
+import types
+
+# macOS: the 'keyboard' package (imported by ir_support) crashes Python on
+# import (bus error). This project never uses it, so give it a harmless stand-in.
+if sys.platform == "darwin" and "keyboard" not in sys.modules:
+    class _NoKeyboard(types.ModuleType):
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: False
+    sys.modules["keyboard"] = _NoKeyboard("keyboard")
+
 import threading
 import traceback
 
@@ -27,7 +38,7 @@ from world import World
 from infeed_cell import InfeedCell
 from yaskawa_cell import SortingCell
 from ur3e_cell import UR3eCell
-# from fanuc_cell import ClassifyCell   # add once that teammate's station exists
+from fanuc_cell import ClassifyCell
 
 DT = 0.05
 
@@ -51,9 +62,9 @@ def main():
     infeed = InfeedCell(world)
     sorter = SortingCell(world)
     ur3e = UR3eCell(world)
-    # classifier = ClassifyCell(world)
+    classifier = ClassifyCell(world)
 
-    stations = [infeed, sorter, ur3e]
+    stations = [infeed, classifier, sorter, ur3e]
     for _ in stations:
         world.register()              # all registered BEFORE any thread starts, so rounds wait for everyone
     threads = [threading.Thread(target=run_station, args=(s, world), daemon=True) for s in stations]
