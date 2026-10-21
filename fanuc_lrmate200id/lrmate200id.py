@@ -89,7 +89,7 @@ class LRMate200iD(DHRobot3D):
                                          (A1 + D4, D1 + A2 + A3),
                                          (A1 + D4 + D6, D1 + A2 + A3))]
 
-        mesh_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "meshes", "LRMate200iD")
+        mesh_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "meshes", "original_stl")
         super().__init__(links, link3D_names, name="LRMate200iD", link3d_dir=mesh_dir,
                          qtest=qtest, qtest_transforms=qtest_transforms)
 
