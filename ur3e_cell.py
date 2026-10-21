@@ -42,12 +42,12 @@ except ImportError:                                  # model pack layout differs
 
 DT = 0.05
 
-# ---- layout (all metres, world frame; plastic_line ends at (-0.90, -2.60)) ----
-BENCH_X = (-1.75, -1.20)        # bench x-extent; rail outer edge of plastic_line is ~-1.13
+# ---- layout (all metres, world frame; plastic_line ends at (-0.50, -2.60)) ----
+BENCH_X = (-1.35, -0.80)        # bench x-extent; rail outer edge of plastic_line is ~-0.73
 BENCH_Y = (-2.95, -2.00)
 BENCH_TOP = BELT_HEIGHT         # bench top flush with belt height -> robot + crate in reach
-UR3E_BASE = SE3(-1.30, -2.50, BENCH_TOP)
-CRATE_XY = (-1.30, -2.15)       # crate beside the robot (~90 deg swing from the belt)
+UR3E_BASE = SE3(-0.90, -2.50, BENCH_TOP)
+CRATE_XY = (-0.90, -2.15)       # crate beside the robot (~90 deg swing from the belt)
 CRATE_SIZE = (0.22, 0.22, 0.12)
 
 GRASP_CLEARANCE = 0.02          # flange stops this far above the item top
@@ -58,7 +58,8 @@ LINE_STEPS = 24                 # Cartesian lower/lift steps (more = slower)
 ITEM_GAP = 0.15
 SPAWN_PERIOD = 10.0             # s between test items
 SPAWN_BEFORE_END = 1.0          # m before the end stop that test items appear
-TEST_SPAWN = True               # set False once the FANUC station feeds plastic_line
+# Test items are only spawned when this cell runs on its own (python ur3e_cell.py).
+# In main_sim.py the plastic comes from the FANUC station instead.
 
 # name: (radius, height, colour)  -- kept short so the UR3e can reach the top
 PLASTIC_ITEMS = {
@@ -205,7 +206,7 @@ def _make_ur3e(base):
 
 
 class UR3eCell:
-    def __init__(self, world: World):
+    def __init__(self, world: World, test_spawn=False):
         self.world = world
         self.env = world.env
         self.belt = world.conveyors["plastic_line"]
@@ -224,6 +225,8 @@ class UR3eCell:
         self.planner = UR3ePlanner(self.robot, BENCH_TOP)
 
         self.items = []
+        self.test_spawn = test_spawn
+        self._adopted = set()                               # id(shape) of belt items already tracked
         self._held_item = None
         self.t = 0.0
         self._next_spawn = 0.0
@@ -255,7 +258,8 @@ class UR3eCell:
         self.t += DT
         if self._held_item is not None:
             self._carry(self._held_item)
-        if TEST_SPAWN and self.t >= self._next_spawn:
+        self._adopt_from_belt()
+        if self.test_spawn and self.t >= self._next_spawn:
             self._spawn()
         self.world.tick()
 
@@ -263,6 +267,20 @@ class UR3eCell:
         """Glue the item under the flange (item top sits at the gripper tip)."""
         offset = SE3(0, 0, item.height / 2 + GRASP_CLEARANCE)
         item.shape.T = (self.robot.fkine(self.robot.q) * offset).A
+
+    def _adopt_from_belt(self):
+        """Start tracking plastic another station (FANUC) has put on plastic_line.
+        Size comes from the tag the spawner gave the item (world.tag_item)."""
+        for shape in list(self.world.active_items):
+            key = id(shape)
+            if key in self._adopted or not self.belt.contains(np.array(shape.T)[:3, 3]):
+                continue
+            self._adopted.add(key)
+            info = self.world.get_item_info(shape)
+            if info is None or any(i.shape is shape for i in self.items):
+                continue                                    # untagged, or one of our own test items
+            self.items.append(Item(shape, info.get("kind", "plastic"),
+                                   info.get("radius", 0.035), info.get("height", 0.14)))
 
     def _spawn(self):
         s = self.belt.length - SPAWN_BEFORE_END
@@ -343,4 +361,4 @@ class UR3eCell:
 if __name__ == "__main__":
     env = swift.Swift()
     env.launch(realtime=True)
-    UR3eCell(World(env, dt=DT)).run()
+    UR3eCell(World(env, dt=DT), test_spawn=True).run()

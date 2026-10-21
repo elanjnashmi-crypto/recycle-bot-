@@ -15,11 +15,11 @@ conveyors = ConveyorSystem(env)
 
 # A few test items: one at the top of each input line
 items = [
-    Cuboid([0.12, 0.12, 0.12], pose=SE3(-0.30, 3.30, BELT_HEIGHT + 0.06),
+    Cuboid([0.12, 0.12, 0.12], pose=SE3(-0.10, 3.30, BELT_HEIGHT + 0.06),
            color=[0.8, 0.6, 0.3, 1]),                           # cardboard box -> general line
-    Cylinder(0.04, 0.20, pose=SE3(-0.90, 0.10, BELT_HEIGHT + 0.10),
+    Cylinder(0.04, 0.20, pose=SE3(-0.50, 0.10, BELT_HEIGHT + 0.10),
              color=[0.2, 0.6, 1.0, 1]),                         # plastic bottle
-    Cylinder(0.035, 0.12, pose=SE3(0.90, 0.10, BELT_HEIGHT + 0.06),
+    Cylinder(0.035, 0.12, pose=SE3(0.50, 0.10, BELT_HEIGHT + 0.06),
              color=[0.75, 0.75, 0.8, 1]),                       # metal can
 ]
 for item in items:

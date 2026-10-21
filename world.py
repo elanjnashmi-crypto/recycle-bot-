@@ -42,6 +42,7 @@ class World:
         self.t = 0.0
         self.running = True          # single e-stop flag for the whole workcell
         self.active_items = []       # shapes currently belt-driven (not held by any gripper)
+        self.item_info = {}          # id(shape) -> dict(kind=..., radius=..., height=...), set by whoever spawns it
         self._cond = threading.Condition(threading.RLock())
         self._n_stations = 0         # registered stations (0 -> standalone, treated as 1)
         self._waiting = 0            # stations waiting in the current round
@@ -69,6 +70,17 @@ class World:
             self.env.add(shape)
 
     # ---------- item registry ----------
+    def tag_item(self, shape, **info):
+        """Record what an item is (kind, radius, height, ...) when it is spawned,
+        so downstream stations' sensors can identify it."""
+        with self._cond:
+            self.item_info[id(shape)] = dict(info)
+
+    def get_item_info(self, shape):
+        """What the spawner recorded for this item, or None if it was never tagged."""
+        with self._cond:
+            return self.item_info.get(id(shape))
+
     def add_active(self, shape):
         """Call once an item is released onto a belt, so the shared
         ConveyorSystem starts carrying it."""

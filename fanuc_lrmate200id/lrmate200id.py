@@ -1,0 +1,248 @@
+"""
+FANUC LR Mate 200iD (standard arm) with a parallel-jaw gripper (Swift, Python).
+
+Sources -- nothing here is guessed:
+  * Kinematics, joint limits and visual meshes: ROS-Industrial
+    fanuc_lrmate200id_support (github.com/ros-industrial/fanuc, BSD licence,
+    see meshes/LICENSE_ros-industrial_fanuc.txt), file
+    urdf/lrmate200id_macro.xacro:
+        J1 0.330 m above the base, J2 0.050 m forward of J1,
+        upper arm (J2->J3) 0.330 m, J3->J4 0.035 m, forearm (J4->J5) 0.335 m,
+        J5->flange 0.080 m.
+  * Joint speeds: FANUC LR Mate 200iD datasheet (450, 380, 520, 550, 545,
+    1000 deg/s), which match the URDF's velocity limits.
+  * Reach 717 mm, payload 7 kg: FANUC datasheet.
+    (0.050 + 0.330 + sqrt(0.335^2 + 0.035^2) = 0.717 m, so the URDF agrees.)
+
+The URDF has the same joint layout as the Yaskawa GP7 used elsewhere in this
+project (both are ROS-Industrial models), so the DH table below has the same
+form as yaskawa_gp7/yaskawa.py, just with the LR Mate's lengths. The DH model
+is checked against the URDF chain in verify_against_urdf().
+
+Usage:
+    robot = LRMate200iD(base=SE3(0, 0, 0.55))
+    robot.add_to_env(env)
+    robot.move_joint(q_goal, step, dt)    # step() advances the world one dt
+"""
+import os
+from math import pi
+
+import numpy as np
+import roboticstoolbox as rtb
+import spatialmath.base as spb
+import swift
+from spatialmath import SE3
+from spatialgeometry import Cuboid
+from ir_support.robots.DHRobot3D import DHRobot3D
+
+# Colours from fanuc_resources/urdf/common_colours.xacro
+FANUC_YELLOW = (0.96, 0.76, 0.13, 1.0)
+FANUC_GRAY28 = (71 / 255, 71 / 255, 71 / 255, 1.0)
+FANUC_BLACK = (0.15, 0.15, 0.15, 1.0)
+LIGHT_GREY = (0.75, 0.75, 0.78, 1.0)
+
+# From the URDF (lrmate200id_macro.xacro), degrees
+QLIM_DEG = [(-170, 170), (-100, 145), (-70, 205), (-190, 190), (-125, 125), (-360, 360)]
+QD_MAX_DEG = [450, 380, 520, 550, 545, 1000]   # rated joint speeds, deg/s (datasheet = URDF)
+SPEED_SCALE = 0.50                             # fraction of rated speed used for moves
+REACH = 0.717                                  # m, datasheet
+
+# Link lengths (m), URDF joint origins
+D1, A1, A2, A3, D4, D6 = 0.330, 0.050, 0.330, 0.035, 0.335, 0.080
+
+# Upper arm vertical, forearm forward, tool pointing straight down
+HOME_Q = [0, 0, 0, 0, -pi / 2, 0]
+
+# Gripper, measured out along the tool axis from the flange
+PALM_LEN = 0.05
+FINGER_LEN = 0.07
+FINGER_THICK = 0.012
+FINGER_OPEN = 0.055                       # half-gap between fingers when open
+TCP_OFFSET = PALM_LEN + FINGER_LEN - 0.02  # tool centre point, 2 cm above the fingertips
+
+
+class LRMate200iD(DHRobot3D):
+    def __init__(self, base=None):
+        links = self._create_DH()
+
+        link3D_names = dict(
+            link0="base_link", color0=FANUC_GRAY28,
+            link1="link_1", color1=FANUC_YELLOW,
+            link2="link_2", color2=FANUC_YELLOW,
+            link3="link_3", color3=FANUC_YELLOW,
+            link4="link_4", color4=FANUC_YELLOW,
+            link5="link_5", color5=FANUC_YELLOW,
+            link6="link_6", color6=FANUC_BLACK,
+        )
+
+        # Pose of each mesh (in the robot's own frame) when q = qtest. The ROS
+        # meshes are drawn in their URDF link frames, which at q = 0 are all
+        # aligned with the base (upper arm vertical, forearm along +x), so
+        # each is just the URDF joint origins summed up the chain.
+        qtest = [0, 0, 0, 0, 0, 0]
+        qtest_transforms = [spb.transl(x, 0, z)
+                            for x, z in ((0, 0),
+                                         (0, D1),
+                                         (A1, D1),
+                                         (A1, D1 + A2),
+                                         (A1, D1 + A2 + A3),
+                                         (A1 + D4, D1 + A2 + A3),
+                                         (A1 + D4 + D6, D1 + A2 + A3))]
+
+        mesh_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "meshes", "LRMate200iD")
+        super().__init__(links, link3D_names, name="LRMate200iD", link3d_dir=mesh_dir,
+                         qtest=qtest, qtest_transforms=qtest_transforms)
+
+        # The last DH frame's z points back into the wrist; flip it so tool z
+        # points out of the flange, then move out to the gripper's TCP.
+        self.tool = SE3.Rx(pi) * SE3(0, 0, TCP_OFFSET)
+        self.qd_max = np.radians(QD_MAX_DEG)
+
+        self._palm = Cuboid([0.04, 0.11, PALM_LEN], color=FANUC_BLACK)
+        self._fingers = [Cuboid([0.025, FINGER_THICK, FINGER_LEN], color=LIGHT_GREY)
+                         for _ in range(2)]
+        self._finger_gap = FINGER_OPEN
+        self._held = None
+        self._held_offset = None
+
+        if base is not None:
+            self.base = base
+        self.q = HOME_Q
+
+    @staticmethod
+    def _create_DH():
+        # Joint signs and zeros match the URDF, so QLIM_DEG applies directly.
+        d      = [D1,    0,     0,     -D4,   0,     -D6]
+        a      = [A1,    A2,    A3,     0,    0,      0]
+        alpha  = [-pi/2, pi,   -pi/2,   pi/2, -pi/2,  0]
+        offset = [0,    -pi/2,  0,      0,    0,      0]
+        return [rtb.RevoluteDH(d=d[i], a=a[i], alpha=alpha[i], offset=offset[i],
+                               qlim=np.radians(QLIM_DEG[i]))
+                for i in range(6)]
+
+    # ---------- scene ----------
+    def __setattr__(self, name, value):
+        # DHRobot3D redraws the meshes *before* storing the new q, so they lag
+        # one step behind. Store first, then redraw arm, gripper and payload.
+        rtb.DHRobot.__setattr__(self, name, value)
+        if name in ("q", "base") and "_relation_matrices" in self.__dict__:
+            self._update_3dmodel()
+            self._update_gripper()
+
+    def add_to_env(self, env):
+        super().add_to_env(env)
+        env.add(self._palm)
+        for finger in self._fingers:
+            env.add(finger)
+        self._update_gripper()
+
+    def _update_gripper(self):
+        if "_fingers" not in self.__dict__:
+            return
+        tcp = self.fkine(self.q)
+        flange = tcp * SE3(0, 0, -TCP_OFFSET)
+        self._palm.T = (flange * SE3(0, 0, PALM_LEN / 2)).A
+        for side, finger in zip((1, -1), self._fingers):
+            y = side * (self._finger_gap + FINGER_THICK / 2)
+            finger.T = (flange * SE3(0, y, PALM_LEN + FINGER_LEN / 2)).A
+        if self._held is not None:
+            self._held.T = (tcp * self._held_offset).A
+
+    # ---------- gripper ----------
+    def set_gripper(self, half_gap, step, dt, duration=0.3):
+        """Open/close the fingers to `half_gap` (m from the TCP) over `duration` s."""
+        start = self._finger_gap
+        n = max(2, int(np.ceil(duration / dt)))
+        for gap in np.linspace(start, half_gap, n):
+            self._finger_gap = gap
+            self._update_gripper()
+            step()
+
+    def grasp(self, obj):
+        """Rigidly attach a scene object to the gripper where it is right now."""
+        self._held = obj
+        self._held_offset = self.fkine(self.q).inv() * SE3(np.array(obj.T), check=False)
+
+    def release(self):
+        obj, self._held = self._held, None
+        return obj
+
+    # ---------- motion ----------
+    def solve(self, T, q_seed):
+        """IK for TCP pose T, starting from q_seed so the arm keeps the same posture."""
+        sol = self.ikine_LM(T, q0=q_seed, joint_limits=True)
+        if not sol.success:
+            raise RuntimeError(f"LR Mate 200iD cannot reach\n{T}")
+        return sol.q
+
+    def move_joint(self, q_goal, step, dt):
+        """Quintic joint-space move, timed so no joint exceeds SPEED_SCALE of its
+        rated speed (a quintic peaks at 1.875 * travel / duration)."""
+        q0 = np.array(self.q, dtype=float)
+        q_goal = np.array(q_goal, dtype=float)
+        T = max(np.max(1.875 * np.abs(q_goal - q0) / (self.qd_max * SPEED_SCALE)), 2 * dt)
+        for q in rtb.jtraj(q0, q_goal, int(np.ceil(T / dt)) + 1).q:
+            self.q = q
+            step()
+
+    def move_line(self, T_goal, step, dt, speed=0.2):
+        """Straight-line TCP move at `speed` m/s (for approach, descend and lift)."""
+        T0 = self.fkine(self.q)
+        dist = np.linalg.norm(T_goal.t - T0.t)
+        n = max(2, int(np.ceil(dist / (speed * dt))) + 1)
+        for T in rtb.ctraj(T0, T_goal, n):
+            self.q = self.solve(T, self.q)
+            step()
+
+    @staticmethod
+    def down_pose(x, y, z, yaw=0.0):
+        """TCP pose at (x, y, z) with the gripper pointing straight down."""
+        return SE3(x, y, z) * SE3.Rz(yaw) * SE3.Rx(pi)
+
+    # ---------- checks ----------
+    def verify_against_urdf(self, n=200, seed=0):
+        """Compare the DH model's flange pose with the URDF joint chain for
+        random joint angles. Returns the worst position error (m)."""
+        def urdf_flange(q):
+            def rot(axis, ang):
+                R = {"x": spb.trotx, "y": spb.troty, "z": spb.trotz}[axis[-1]]
+                return R(-ang if axis[0] == "-" else ang)
+            chain = [((0, 0, D1), "z", q[0]), ((A1, 0, 0), "y", q[1]), ((0, 0, A2), "-y", q[2]),
+                     ((0, 0, A3), "-x", q[3]), ((D4, 0, 0), "-y", q[4]), ((D6, 0, 0), "-x", q[5])]
+            T = np.eye(4)
+            for xyz, axis, ang in chain:
+                T = T @ spb.transl(*xyz) @ rot(axis, ang)
+            return T
+
+        rng = np.random.default_rng(seed)
+        worst = 0.0
+        for _ in range(n):
+            q = rng.uniform(self.qlim[0], self.qlim[1])
+            dh = np.eye(4)
+            for link, qi in zip(self.links, q):
+                dh = dh @ link.A(qi).A
+            worst = max(worst, float(np.linalg.norm(dh[:3, 3] - urdf_flange(q)[:3, 3])))
+        return worst
+
+    def test(self):
+        """Show the robot in Swift and swing through its base rotation."""
+        env = swift.Swift()
+        env.launch(realtime=True)
+        self.add_to_env(env)
+        dt = 0.05
+
+        def step():
+            env.step(dt)
+
+        print(f"DH vs URDF worst flange error: {self.verify_against_urdf() * 1000:.3f} mm")
+        lo, hi = self.qlim[:, 0]
+        for q1 in (lo, hi, 0):
+            self.move_joint([q1, 0.3, 0.2, 0, -pi / 2 - 0.5, 0], step, dt)
+        self.set_gripper(0.02, step, dt)
+        self.set_gripper(FINGER_OPEN, step, dt)
+        print("TCP pose:\n", self.fkine(self.q))
+        env.hold()
+
+
+if __name__ == "__main__":
+    LRMate200iD().test()

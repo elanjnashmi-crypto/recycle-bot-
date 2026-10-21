@@ -98,6 +98,7 @@ class GeneralBin:
         else:
             shape = Cuboid([r * 2, r * 2, h], pose=SE3(x, y, z), color=colour)
         world.add(shape)          # thread-safe: other station may be stepping Swift
+        world.tag_item(shape, kind=kind, shape_type=mesh, radius=r, height=h)  # read by the FANUC camera
         return Item(shape, kind, r, h)
 
 
