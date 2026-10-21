@@ -1,22 +1,3 @@
-"""
-Aluminium sorting cell at the end of the metal line -- Dom's station.
-
-Metal items ride metal_return up to its end stop. The Yaskawa GP7 picks each
-one, weighs it with the load cell in its wrist, and drops it in the Al or
-Non-Al deposit box behind it. Aluminium is about a third the density of steel,
-so for same-sized cans weight alone separates them.
-
-Can run standalone for development:
-    python yaskawa_cell.py
-or be plugged into the shared workcell via main_sim.py by passing in a
-shared World instead of letting it build its own.
-
-NOTE: until the FANUC classify station exists, this cell spawns its own
-test items directly onto metal_return (see _spawn). Once that station is
-wired in, delete _spawn/_next_spawn/_movable_items's self-spawn path and
-this cell will instead pick up whatever the FANUC station places on
-metal_return via world.active_items.
-"""
 from dataclasses import dataclass
 
 import numpy as np
@@ -41,16 +22,9 @@ LOAD_CELL_NOISE_KG = 0.002
 
 APPROACH = 0.15                         # clearance above items / bins for approach moves
 ITEM_GAP = 0.15                         # items queue this far apart behind the end stop
-SPAWN_PERIOD = 9.0                      # s between new test items (placeholder spawner, see NOTE above)
-SPAWN_BEFORE_END = 1.2                  # m before the end stop that new items appear
 
-# name: (radius, height, mass kg, aluminium?, colour)
-METAL_ITEMS = {
-    "al_drink_can":      (0.033, 0.122, 0.014, True,  (0.80, 0.82, 0.88, 1)),
-    "al_tall_can":       (0.033, 0.168, 0.018, True,  (0.70, 0.75, 0.85, 1)),
-    "steel_food_can":    (0.037, 0.110, 0.055, False, (0.55, 0.55, 0.50, 1)),
-    "steel_aerosol_can": (0.030, 0.170, 0.070, False, (0.60, 0.40, 0.30, 1)),
-}
+# Used only if an item arrives without a tag (should not happen in the full sim).
+DEFAULT_RADIUS, DEFAULT_HEIGHT, DEFAULT_MASS_KG = 0.033, 0.122, 0.055
 
 
 @dataclass
@@ -136,10 +110,8 @@ class SortingCell:
         }
         self.load_cell = LoadCell()
 
-        self.items = []             # items this station is tracking (spawned or picked)
         self.t = 0.0
-        self._next_spawn = 0.0
-        self.rng = np.random.default_rng()
+        self._warned_untagged = False
 
         # Waiting pose: gripper above the end stop. Every other pose is solved
         # from a seed facing the target, so the arm stays elbow-up throughout.
@@ -153,30 +125,27 @@ class SortingCell:
         SHARED world clock (conveyors + render) rather than owning its own,
         so this station stays in sync with whatever else is on the belts."""
         self.t += DT
-        if self.t >= self._next_spawn:
-            self._spawn()   # TODO: remove once the FANUC classify station feeds metal_return for real
         self.world.tick()
 
-    def _spawn(self):
-        s = self.belt.length - SPAWN_BEFORE_END
-        if any(self.belt.contains(i.pos) and abs(self.belt.progress(i.pos) - s) < ITEM_GAP
-               for i in self.items):
-            return                                  # queue has backed up; try next step
-        kind = self.rng.choice(list(METAL_ITEMS))
-        r, h, m, al, colour = METAL_ITEMS[kind]
-        p = self.belt.start + self.belt.dir * s
-        shape = Cylinder(r, h, pose=SE3(p[0], p[1], BELT_HEIGHT + h / 2), color=colour)
-        self.world.add(shape)       # thread-safe: other station may be stepping Swift
-        item = Item(shape, kind, r, h, m, al)
-        self.items.append(item)
-        self.world.add_active(shape)
-        self._next_spawn = self.t + SPAWN_PERIOD
+    def _as_item(self, shape):
+        """Wrap a belt shape in an Item using the tag the infeed gave it."""
+        info = self.world.get_item_info(shape)
+        if info is None:
+            if not self._warned_untagged:
+                print("[yaskawa] item with no tag on metal_return -- using default size/mass")
+                self._warned_untagged = True
+            info = {}
+        return Item(shape, info.get("kind", "untagged"),
+                    info.get("radius", DEFAULT_RADIUS), info.get("height", DEFAULT_HEIGHT),
+                    info.get("mass_kg", DEFAULT_MASS_KG), bool(info.get("is_aluminium", False)))
 
     def _item_at_pick(self):
+        """First item that has reached the end stop of metal_return."""
         stop = self.belt.length - 0.1
-        for item in self.items:
-            if self.belt.contains(item.pos) and self.belt.progress(item.pos) >= stop - 0.005:
-                return item
+        for shape in list(self.world.active_items):
+            p = np.array(shape.T)[:3, 3]
+            if self.belt.contains(p) and self.belt.progress(p) >= stop - 0.005:
+                return self._as_item(shape)
         return None
 
     # ---------- robot ----------
@@ -199,7 +168,6 @@ class SortingCell:
         r.move_line(grasp, self.step, DT, speed=0.125)
         r.set_gripper(item.radius, self.step, DT)
         r.grasp(item.shape)
-        self.items.remove(item)
         self.world.remove_active(item.shape)   # now held by the gripper, not belt-driven
         r.move_line(above, self.step, DT)
 

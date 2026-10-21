@@ -1,23 +1,3 @@
-"""
-Material classification cell on the cross line -- FANUC LR Mate 200iD.
-
-Items come down main_line from the Kawasaki infeed and drop onto cross_line,
-right in front of the FANUC stand. An overhead camera over the drop point
-identifies each item's material. The LR Mate 200iD then
-  * picks PLASTIC off the moving cross line and places it on plastic_line,
-  * picks METAL and places it on metal_line,
-  * leaves everything else (cardboard, glass, food...) on cross_line, which
-    carries it on to general_line.
-
-Picking is done with conveyor tracking: the gripper waits above the pick
-window, and when a target item arrives it descends while following the item
-along the belt, so the belt never has to stop for food/cardboard behind it.
-
-Can run standalone for development (spawns its own mixed test items onto the
-cross line):
-    python fanuc_cell.py
-or as part of the shared workcell via main_sim.py (shares one World).
-"""
 import sys
 import types
 
@@ -58,8 +38,9 @@ DESCEND_SPEED = 0.30        # m/s, tracking descent onto a moving item
 PLACE_PROGRESS = 0.15       # m along plastic/metal line from its start where items are placed
 GRASP_BELOW_TOP = FINGER_LEN - 0.01   # TCP stops this far below the item's top
 
-# What the camera reports for each item kind the infeed produces
-# (kinds from infeed_cell.RUBBISH_ITEMS). Anything not listed -> "general".
+# Fallback only: the infeed now tags every item with its "material"
+# (infeed_cell.RUBBISH_ITEMS), which the camera uses first. Anything not
+# listed here and not tagged -> "general".
 MATERIAL_OF = {
     "plastic_bottle": "plastic",
     "drink_can": "metal",
@@ -97,7 +78,11 @@ class OverheadCamera:
             key = id(shape)
             if key not in self.seen:
                 info = self.world.get_item_info(shape) or {}
-                self.seen[key] = MATERIAL_OF.get(info.get("kind"), "general")
+                # Prefer the material the infeed tagged the item with; fall back to the
+                # kind lookup for items spawned by older test code. Anything that isn't
+                # plastic or metal (organic, cardboard, glass...) is left as "general".
+                material = info.get("material") or MATERIAL_OF.get(info.get("kind"), "general")
+                self.seen[key] = material if material in TARGET_LINE else "general"
             found.append((shape, self.seen[key]))
         return found
 

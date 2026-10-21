@@ -1,23 +1,3 @@
-"""
-Single entry point for the shared Kerbside workcell.
-
-Creates ONE Swift environment and ONE World (shared conveyors + render
-clock), then runs every station concurrently, each in its own thread.
-Stations stay independent (each still has its own blocking run() loop,
-inherited from how GP7/RS007L's move_* helpers work -- they repeatedly
-call a per-substep callback), but all of them now tick the SAME world
-instead of each building a private one, so items genuinely flow from the
-Kawasaki infeed, along main_line, to wherever the next station is.
-
-Run:
-    python main_sim.py
-
-Known limitation (see world.py's tick() docstring): because each station's
-blocking move loop calls world.tick() independently, belts/spawners can
-advance a bit faster than DT alone suggests when two robots are mid-move at
-the same wall-clock moment. Fine for a visual demo; replace with a
-fixed-rate scheduler thread if exact timing ever matters.
-"""
 import sys
 import types
 
@@ -29,53 +9,108 @@ if sys.platform == "darwin" and "keyboard" not in sys.modules:
             return lambda *args, **kwargs: False
     sys.modules["keyboard"] = _NoKeyboard("keyboard")
 
+import importlib
 import threading
+import time
 import traceback
 
 import swift
 
-from world import World
-from infeed_cell import InfeedCell
-from yaskawa_cell import SortingCell
-from ur3e_cell import UR3eCell
-from fanuc_cell import ClassifyCell
-
 DT = 0.05
+WATCHDOG_PERIOD = 4.0          # s of wall time with no clock progress before a stack dump
+
+# Which UR3e station sits at the end of plastic_line. Only ONE of these can be
+# used (they occupy the same spot):
+#   "team" -> ur3e_cell.UR3eCell          (the group's version)
+#   "mine" -> ur3e_plastic_cell.UR3eCell  (bench + crate version, elbow-up planner)
+UR3E_IMPL = "team"
+
+# (display name, module, class). Order = thread start order.
+STATIONS = [
+    ("Kawasaki infeed", "infeed_cell", "InfeedCell"),
+    ("FANUC classifier", "fanuc_cell", "ClassifyCell"),
+    ("Yaskawa sorter", "yaskawa_cell", "SortingCell"),
+    ("Organic basket", "organic_cell", "OrganicBasketCell"),
+    ("UR3e", "ur3e_cell" if UR3E_IMPL == "team" else "ur3e_plastic_cell", "UR3eCell"),
+]
+
+
+def build_stations(world):
+    """Import + construct every station; skip (and report) any that fail."""
+    stations = []
+    for name, module, cls_name in STATIONS:
+        try:
+            cls = getattr(importlib.import_module(module), cls_name)
+            stations.append(cls(world))
+            print(f"[main] built: {name}")
+        except Exception:
+            print(f"[main] FAILED to build {name} ({module}.{cls_name}) -- skipping it. Traceback:")
+            traceback.print_exc()
+    return stations
 
 
 def run_station(station, world):
+    name = type(station).__name__
+    print(f"[main] started: {name}")
     try:
         station.run()
-    except Exception:                 # keep one station's crash from killing the whole sim
-        print(f"[{type(station).__name__}] stopped with an exception:")
+    except Exception:
+        print(f"[main] {name} stopped with an exception:")
         traceback.print_exc()
     finally:
         world.unregister()            # don't leave the other stations waiting on a dead one
 
 
-def main():
-    env = swift.Swift()
-    env.launch(realtime=True)
+def watchdog(world, threads):
+    """Main-thread loop: if the clock stops advancing, show where each thread is stuck."""
+    last_t, last_change = world.t, time.time()
+    while any(t.is_alive() for t in threads):
+        time.sleep(0.5)
+        if world.t != last_t:
+            last_t, last_change = world.t, time.time()
+        elif world.running and time.time() - last_change > WATCHDOG_PERIOD:
+            print(f"\n[main] WATCHDOG: world clock stuck at t={world.t:.2f}s for "
+                  f">{WATCHDOG_PERIOD:.0f}s. Where each thread is:")
+            frames = sys._current_frames()
+            for t in threads:
+                if t.is_alive() and t.ident in frames:
+                    print(f"--- {t.name}")
+                    traceback.print_stack(frames[t.ident], limit=6)
+            last_change = time.time()      # report again only after another full period
+    print("[main] all stations have stopped.")
 
+
+def main():
+    from world import World
+
+    env = swift.Swift()
+    try:
+        # Building four robots takes a while with no Swift traffic. Newer Swift
+        # versions close the browser tab after a few seconds of silence, which
+        # makes the next env.add() time out -- so turn that timer off.
+        env.launch(realtime=True, browser_timeout=None)
+    except TypeError:                 # older Swift without that option
+        env.launch(realtime=True)
     world = World(env, dt=DT)
 
-    infeed = InfeedCell(world)
-    sorter = SortingCell(world)
-    ur3e = UR3eCell(world)
-    classifier = ClassifyCell(world)
+    stations = build_stations(world)
+    if not stations:
+        print("[main] no stations could be built -- nothing to run. See tracebacks above.")
+        return
 
-    stations = [infeed, classifier, sorter, ur3e]
     for _ in stations:
         world.register()              # all registered BEFORE any thread starts, so rounds wait for everyone
-    threads = [threading.Thread(target=run_station, args=(s, world), daemon=True) for s in stations]
+    threads = [threading.Thread(target=run_station, args=(s, world), daemon=True,
+                                name=type(s).__name__) for s in stations]
     for t in threads:
         t.start()
 
-    # Main thread just keeps the process alive -- all world.tick() calls
-    # happen from the station threads, serialised by World's internal lock.
     # Hook a GUI e-stop button here later: world.estop() / world.reset() /
     # world.resume(), called from whatever thread the GUI runs on.
-    threading.Event().wait()
+    try:
+        watchdog(world, threads)
+    except KeyboardInterrupt:
+        print("\n[main] interrupted.")
 
 
 if __name__ == "__main__":

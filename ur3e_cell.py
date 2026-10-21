@@ -1,28 +1,3 @@
-"""
-UR3e plastic-collection cell at the end of plastic_line.
-
-The belt carries plastic items to its end stop. The UR3e (mounted on a small
-bench beside the belt end) picks each one and places it in a plastic crate
-that sits on the same bench. This is the part of the workcell that is
-reproduced on the REAL UR3e: same pick-from-belt-end / place-in-crate motion,
-so the real-robot evidence maps directly onto this simulated station.
-
-Motion:
-  * big moves (wait -> hover -> crate) are joint-space moves to an IK solution
-    chosen to be (a) elbow-up, (b) nearest to the current pose and (c) clear of
-    the bench along the whole joint path (see UR3ePlanner);
-  * the final lower / lift over the belt are straight-line Cartesian moves
-    solved step by step from the previous joint state (resolved-rate style),
-    so the tool goes straight down onto the item instead of arcing.
-
-Run standalone for development:
-    python ur3e_plastic_cell.py
-or as part of the shared workcell via main_sim.py (shares one World).
-
-REACH NOTE: a UR3e only reaches ~0.5 m, so it is mounted on a bench at belt
-height ~0.4 m from the pick point. If a target cannot be reached the error
-says which one -- move UR3E_BASE closer or use shorter items.
-"""
 from dataclasses import dataclass
 from math import pi
 
@@ -33,6 +8,7 @@ from spatialmath import SE3
 from spatialgeometry import Cuboid, Cylinder
 
 from conveyors import BELT_HEIGHT
+from crate_model import build_milk_crate
 from world import World
 
 try:
@@ -48,12 +24,20 @@ BENCH_Y = (-2.95, -2.00)
 BENCH_TOP = BELT_HEIGHT         # bench top flush with belt height -> robot + crate in reach
 UR3E_BASE = SE3(-0.90, -2.50, BENCH_TOP)
 CRATE_XY = (-0.90, -2.15)       # crate beside the robot (~90 deg swing from the belt)
-CRATE_SIZE = (0.22, 0.22, 0.12)
+CRATE_SIZE = (0.30, 0.30, 0.22)  # milk-crate footprint and height
+CRATE_COLOUR = (0.15, 0.35, 0.75, 1)
+CRATE_DARK = (0.10, 0.22, 0.50, 1)
+
+# The crate sits on a LOWER side table, not on the robot's bench: the arm only
+# reaches ~0.5 m, so a lower rim means a lower, closer release point.
+SIDE_TABLE_TOP = 0.42           # table-top height (belt is 0.75)
+SIDE_TABLE_SIZE = 0.36
+PEDESTAL_SIZE = 0.30            # the robot stands on a pedestal at belt height
 
 GRASP_CLEARANCE = 0.02          # flange stops this far above the item top
 APPROACH = 0.08                 # hover height above item top / crate rim (small: UR3e reach)
-MOVE_STEPS = 50                 # joint-move interpolation steps (more = slower)
-LINE_STEPS = 24                 # Cartesian lower/lift steps (more = slower)
+MOVE_STEPS = 28                 # joint-move interpolation steps (more = slower)
+LINE_STEPS = 12                 # Cartesian lower/lift steps (more = slower)
 
 ITEM_GAP = 0.15
 SPAWN_PERIOD = 10.0             # s between test items
@@ -82,35 +66,34 @@ class Item:
 
 
 class Crate:
-    """Open-top crate on the bench that collects the plastic."""
+    """Slatted milk-crate on a low side table that collects the plastic."""
 
-    WALL = 0.01
-
-    def __init__(self, env, xy, colour=(0.15, 0.35, 0.75, 1)):
+    def __init__(self, env, xy, colour=CRATE_COLOUR):
         self.x, self.y = xy
-        L, W, H = CRATE_SIZE
-        t = self.WALL
-        panels = [
-            ([L, W, t], (0, 0, t / 2)),
-            ([t, W, H], (+(L - t) / 2, 0, H / 2)),
-            ([t, W, H], (-(L - t) / 2, 0, H / 2)),
-            ([L, t, H], (0, +(W - t) / 2, H / 2)),
-            ([L, t, H], (0, -(W - t) / 2, H / 2)),
-        ]
-        for size, (dx, dy, dz) in panels:
-            env.add(Cuboid(size, pose=SE3(self.x + dx, self.y + dy, BENCH_TOP + dz), color=colour))
+        sz = SIDE_TABLE_SIZE
+        env.add(Cuboid([sz, sz, 0.03], pose=SE3(self.x, self.y, SIDE_TABLE_TOP - 0.015),
+                       color=(0.55, 0.40, 0.25, 1)))                       # table top
+        for sx in (+1, -1):                                                 # four legs
+            for sy in (+1, -1):
+                env.add(Cuboid([0.04, 0.04, SIDE_TABLE_TOP - 0.03],
+                               pose=SE3(self.x + sx * (sz / 2 - 0.03), self.y + sy * (sz / 2 - 0.03),
+                                        (SIDE_TABLE_TOP - 0.03) / 2), color=(0.35, 0.35, 0.38, 1)))
+        A, W, H = CRATE_SIZE
+        self.floor_z, half_a, half_w = build_milk_crate(env, self.x, self.y, SIDE_TABLE_TOP,
+                                                        A, W, H, colour, CRATE_DARK)
+        self.inner = min(half_a, half_w)
         self.count = 0
         self.rng = np.random.default_rng()
 
     def rim_z(self):
-        return BENCH_TOP + CRATE_SIZE[2]
+        return SIDE_TABLE_TOP + CRATE_SIZE[2]
 
     def drop(self, item, step):
         """Release: item falls to the crate floor at a random spot (stacked in layers)."""
-        inner = max(0.0, CRATE_SIZE[0] / 2 - self.WALL - item.radius)
+        inner = max(0.0, self.inner - item.radius)
         x, y = (self.x, self.y) + self.rng.uniform(-inner, inner, 2)
         layer = (self.count // 4) % 3
-        z_rest = BENCH_TOP + self.WALL + item.height / 2 + layer * 0.03
+        z_rest = self.floor_z + item.height / 2 + layer * 0.03
         T = np.array(item.shape.T)
         z, v = T[2, 3], 0.0
         while z > z_rest:
@@ -156,12 +139,12 @@ class UR3ePlanner:
         z = self.heights(q)
         return min(z[1:]) >= self.bench_top + self.MIN_CLEAR and z[2] >= z[1] + self.ELBOW_RISE
 
-    def path_ok(self, q_a, q_b, n=20):
+    def path_ok(self, q_a, q_b, n=10):
         """Joint-space path stays clear of the bench. (Elbow-up is only demanded of
         the target, so a robot starting from a flat 'zero' pose can still move.)"""
         return all(self.clear_of_bench(q) for q in rtb.jtraj(q_a, q_b, n).q)
 
-    def solve(self, T, q_now, tries=40):
+    def solve(self, T, q_now, tries=12):
         """Valid IK solution nearest to q_now whose joint-space path from q_now
         stays clear of the bench; None if there is none."""
         q_now = np.array(q_now, dtype=float)
@@ -177,6 +160,8 @@ class UR3ePlanner:
             d = float(np.abs(q - q_now).sum())
             if d < best_d and self.pose_ok(q) and self.path_ok(q_now, q):
                 best, best_d = q, d
+                if d < 1.0:             # close enough: stop searching, the shared clock waits on us
+                    break
         return best
 
     def line(self, xyz_from, xyz_to, yaw, q_now, steps):
@@ -211,9 +196,9 @@ class UR3eCell:
         self.env = world.env
         self.belt = world.conveyors["plastic_line"]
 
-        # bench the robot and crate sit on
-        bx, by = (BENCH_X[0] + BENCH_X[1]) / 2, (BENCH_Y[0] + BENCH_Y[1]) / 2
-        self.env.add(Cuboid([BENCH_X[1] - BENCH_X[0], BENCH_Y[1] - BENCH_Y[0], BENCH_TOP],
+        # pedestal the robot stands on (belt height) + the low side table / crate
+        bx, by = UR3E_BASE.t[0], UR3E_BASE.t[1]
+        self.env.add(Cuboid([PEDESTAL_SIZE, PEDESTAL_SIZE, BENCH_TOP],
                             pose=SE3(bx, by, BENCH_TOP / 2), color=(0.45, 0.45, 0.48, 1)))
         self.crate = Crate(self.env, CRATE_XY)
 
@@ -264,9 +249,12 @@ class UR3eCell:
         self.world.tick()
 
     def _carry(self, item):
-        """Glue the item under the flange (item top sits at the gripper tip)."""
+        """Glue the item under the flange (item top sits at the gripper tip).
+        Only the POSITION follows the tool: the tool points straight down, so
+        copying its orientation would turn the item upside down."""
         offset = SE3(0, 0, item.height / 2 + GRASP_CLEARANCE)
-        item.shape.T = (self.robot.fkine(self.robot.q) * offset).A
+        p = (self.robot.fkine(self.robot.q) * offset).t
+        item.shape.T = SE3(p[0], p[1], p[2]).A
 
     def _adopt_from_belt(self):
         """Start tracking plastic another station (FANUC) has put on plastic_line.
