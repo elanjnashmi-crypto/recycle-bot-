@@ -10,6 +10,8 @@ if sys.platform == "darwin" and "keyboard" not in sys.modules:
     sys.modules["keyboard"] = _NoKeyboard("keyboard")
 
 import importlib
+import os
+import signal
 import threading
 import time
 import traceback
@@ -100,17 +102,38 @@ def main():
 
     for _ in stations:
         world.register()              # all registered BEFORE any thread starts, so rounds wait for everyone
+    # Safety (light curtain, speed zone, stack light) and the item spawner are
+    # added before any station thread starts, so they can still touch Swift directly.
+    fanuc = next((s for s in stations if type(s).__name__ == "ClassifyCell"), None)
+    safety = spawner = None
+    try:
+        from safety import SafetySystem
+        safety = SafetySystem(world, fanuc)
+    except Exception:
+        print("[main] safety system failed to build:")
+        traceback.print_exc()
+    try:
+        from item_spawner import ItemSpawner
+        spawner = ItemSpawner(world)
+    except Exception:
+        print("[main] item spawner failed to build:")
+        traceback.print_exc()
+
     threads = [threading.Thread(target=run_station, args=(s, world), daemon=True,
                                 name=type(s).__name__) for s in stations]
     for t in threads:
         t.start()
 
-    # Hook a GUI e-stop button here later: world.estop() / world.reset() /
-    # world.resume(), called from whatever thread the GUI runs on.
-    try:
-        watchdog(world, threads)
-    except KeyboardInterrupt:
-        print("\n[main] interrupted.")
+    # Ctrl+C in the terminal quits straight away (Tk would otherwise swallow it).
+    signal.signal(signal.SIGINT, lambda *_: os._exit(0))
+
+    # Control panel on the main thread (Tk needs it on macOS); the watchdog
+    # moves to a background thread. Without a display, fall back to the old loop.
+    threading.Thread(target=watchdog, args=(world, threads), daemon=True, name="watchdog").start()
+    from control_panel import run_panel
+    if not run_panel(world, fanuc, safety, spawner):
+        for t in threads:
+            t.join()
 
 
 if __name__ == "__main__":

@@ -336,6 +336,9 @@ class InfeedCell:
     def run(self):
         self._move_joint(self.q_wait)
         while True:
+            if not getattr(self.world, "auto_feed", True):   # manual spawning: wait, don't feed
+                self.step()
+                continue
             if not self.items_in_bin:
                 self._refill()
             self.pick_and_place(self.items_in_bin[0])

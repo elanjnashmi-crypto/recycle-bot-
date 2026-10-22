@@ -34,7 +34,11 @@ TALLEST_ITEM = 0.20         # tallest item the infeed produces (plastic_bottle)
 PICK_WINDOW_X = -0.18       # gripper waits above this x on the cross line
 TRIGGER_AHEAD = 0.02        # start the tracking descent this far before the item is under the gripper
 LAST_CHANCE_X = -0.24       # item already past this x when the robot is free -> let it go
-DESCEND_SPEED = 0.30        # m/s, tracking descent onto a moving item
+DESCEND_SPEED = 0.30        # m/s, tracking descent onto a moving item. NOT scaled by the
+                            # safety slow-down: any slower and the belt carries cans out of reach
+BELT_SPEED_REF = 0.15       # m/s, belt speed DESCEND_SPEED was tuned for (scaled up for faster belts)
+LIFT_SPEED = 0.25           # m/s peak, lift off the belt (at 100 %)
+PLACE_SPEED = 0.18          # m/s peak, lower onto the plastic/metal line (at 100 %)
 PLACE_PROGRESS = 0.15       # m along plastic/metal line from its start where items are placed
 GRASP_BELOW_TOP = FINGER_LEN - 0.01   # TCP stops this far below the item's top
 
@@ -110,6 +114,11 @@ class ClassifyCell:
 
         self.t = 0.0
         self.counts = {"plastic": 0, "metal": 0, "general": 0, "missed": 0}
+
+        # Speed factor (1.0 = normal). The safety speed zone slows the whole cell via World instead.
+        self.zone_factor = 1.0
+        self.robot.speed_fn = lambda: self.zone_factor
+
         self.test_spawn = test_spawn
         self._next_spawn = 1.0
         self.rng = np.random.default_rng()
@@ -144,7 +153,7 @@ class ClassifyCell:
         busy), spawn test items (standalone only), advance the shared clock."""
         self.t += DT
         self._observe()
-        if self.test_spawn and self.t >= self._next_spawn:
+        if self.test_spawn and self.world.auto_feed and self.t >= self._next_spawn:
             self._spawn_test_item()
         self.world.tick()
 
@@ -198,9 +207,22 @@ class ClassifyCell:
         yaw = float(r.fkine(r.q).rpy()[2])          # keep the current gripper heading
         z = self.hover_z
         z_grasp = BELT_HEIGHT + h - GRASP_BELOW_TOP
+        held = False
         while z > z_grasp:
-            z = max(z_grasp, z - DESCEND_SPEED * DT)
+            k = r.speed_factor()
+            if k <= 0:                               # held by a safety stop: don't move at all
+                held = True
+                self.step()
+                continue
             p = np.array(shape.T)[:3, 3]             # item keeps moving with the belt
+            if held:                                 # don't jump after the item once released
+                tcp = r.fkine(r.q).t
+                if np.hypot(p[0] - tcp[0], p[1] - tcp[1]) > 0.05:
+                    raise RuntimeError("item moved away while the arm was held")
+                held = False
+            # faster belt -> faster descent, so the item travels the same distance meanwhile
+            descend = DESCEND_SPEED * max(1.0, self.cross.speed / BELT_SPEED_REF)
+            z = max(z_grasp, z - descend * DT)
             T = SE3(p[0], p[1], z) * SE3.Rz(yaw) * SE3.Rx(pi)
             r.q = r.solve(T, r.q)
             self.step()
@@ -208,7 +230,8 @@ class ClassifyCell:
         r.set_gripper(info.get("radius", 0.03), self.step, DT)
         r.grasp(shape)
         p = np.array(shape.T)[:3, 3]
-        r.move_line(LRMate200iD.down_pose(p[0], p[1], self.hover_z, self._yaw(p[0], p[1])), self.step, DT)
+        r.move_line(LRMate200iD.down_pose(p[0], p[1], self.hover_z, self._yaw(p[0], p[1])), self.step, DT,
+                    speed=LIFT_SPEED)
 
     def _place(self, shape, info, material):
         r = self.robot
@@ -217,12 +240,12 @@ class ClassifyCell:
         yaw = self._yaw(x, y)
         r.move_joint(self.q_place[material], self.step, DT)
         z_release = BELT_HEIGHT + 0.01 + h - GRASP_BELOW_TOP
-        r.move_line(LRMate200iD.down_pose(x, y, z_release, yaw), self.step, DT, speed=0.15)
+        r.move_line(LRMate200iD.down_pose(x, y, z_release, yaw), self.step, DT, speed=PLACE_SPEED)
         r.set_gripper(FINGER_OPEN, self.step, DT, duration=0.15)
         r.release()
         shape.T = SE3(x, y, BELT_HEIGHT + h / 2).A   # settle upright on the belt
         self.world.add_active(shape)                 # now carried by plastic/metal line
-        r.move_line(LRMate200iD.down_pose(x, y, self.hover_z, yaw), self.step, DT)
+        r.move_line(LRMate200iD.down_pose(x, y, self.hover_z, yaw), self.step, DT, speed=LIFT_SPEED)
 
     def sort(self, shape, material):
         info = self.world.get_item_info(shape) or {}
@@ -252,6 +275,17 @@ class ClassifyCell:
 
 
 if __name__ == "__main__":
+    # Standalone: FANUC + belts + safety + control panel, no other robots.
+    import threading
+    from control_panel import run_panel
+    from item_spawner import ItemSpawner
+    from safety import SafetySystem
+
     env = swift.Swift()
     env.launch(realtime=True)
-    ClassifyCell(World(env, dt=DT), test_spawn=True).run()
+    world = World(env, dt=DT)
+    cell = ClassifyCell(world, test_spawn=True)
+    safety = SafetySystem(world, cell)
+    spawner = ItemSpawner(world)
+    threading.Thread(target=cell.run, daemon=True, name="ClassifyCell").start()
+    run_panel(world, cell, safety, spawner)

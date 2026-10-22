@@ -24,6 +24,17 @@ Usage:
     robot.add_to_env(env)
     robot.move_joint(q_goal, step, dt)    # step() advances the world one dt
 """
+import sys
+import types
+
+# macOS: the 'keyboard' package (imported by ir_support) crashes Python on
+# import (bus error). This project never uses it, so give it a harmless stand-in.
+if sys.platform == "darwin" and "keyboard" not in sys.modules:
+    class _NoKeyboard(types.ModuleType):
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: False
+    sys.modules["keyboard"] = _NoKeyboard("keyboard")
+
 import os
 from math import pi
 
@@ -44,7 +55,8 @@ LIGHT_GREY = (0.75, 0.75, 0.78, 1.0)
 # From the URDF (lrmate200id_macro.xacro), degrees
 QLIM_DEG = [(-170, 170), (-100, 145), (-70, 205), (-190, 190), (-125, 125), (-360, 360)]
 QD_MAX_DEG = [450, 380, 520, 550, 545, 1000]   # rated joint speeds, deg/s (datasheet = URDF)
-SPEED_SCALE = 0.50                             # fraction of rated speed used for moves
+SPEED_SCALE = 0.30                             # fraction of rated speed at 100 % override (was 0.50)
+ROT_SPEED = 1.5                                # rad/s, tool re-orientation during straight-line moves
 REACH = 0.717                                  # m, datasheet
 
 # Link lengths (m), URDF joint origins
@@ -104,6 +116,9 @@ class LRMate200iD(DHRobot3D):
         self._finger_gap = FINGER_OPEN
         self._held = None
         self._held_offset = None
+        # Live speed factor 0..1, read every motion step (speed override slider x
+        # safety slow-down). None -> always full speed. 0 -> hold position.
+        self.speed_fn = None
 
         if base is not None:
             self.base = base
@@ -150,13 +165,14 @@ class LRMate200iD(DHRobot3D):
 
     # ---------- gripper ----------
     def set_gripper(self, half_gap, step, dt, duration=0.3):
-        """Open/close the fingers to `half_gap` (m from the TCP) over `duration` s."""
+        """Open/close the fingers to `half_gap` (m from the TCP) over `duration` s
+        (at 100 % speed)."""
         start = self._finger_gap
-        n = max(2, int(np.ceil(duration / dt)))
-        for gap in np.linspace(start, half_gap, n):
-            self._finger_gap = gap
+
+        def apply(u):
+            self._finger_gap = start + u * (half_gap - start)
             self._update_gripper()
-            step()
+        self._run_profile(duration, apply, step, dt)
 
     def grasp(self, obj):
         """Rigidly attach a scene object to the gripper where it is right now."""
@@ -175,24 +191,50 @@ class LRMate200iD(DHRobot3D):
             raise RuntimeError(f"LR Mate 200iD cannot reach\n{T}")
         return sol.q
 
-    def move_joint(self, q_goal, step, dt):
-        """Quintic joint-space move, timed so no joint exceeds SPEED_SCALE of its
-        rated speed (a quintic peaks at 1.875 * travel / duration)."""
-        q0 = np.array(self.q, dtype=float)
-        q_goal = np.array(q_goal, dtype=float)
-        T = max(np.max(1.875 * np.abs(q_goal - q0) / (self.qd_max * SPEED_SCALE)), 2 * dt)
-        for q in rtb.jtraj(q0, q_goal, int(np.ceil(T / dt)) + 1).q:
-            self.q = q
+    def speed_factor(self):
+        """Current speed factor 0..1 (override x safety); 1 when nothing is set."""
+        if self.speed_fn is None:
+            return 1.0
+        return min(1.0, max(0.0, float(self.speed_fn())))
+
+    @staticmethod
+    def _quintic(s):
+        """Smooth 0->1 progress (zero velocity and acceleration at both ends)."""
+        return s ** 3 * (10 - 15 * s + 6 * s * s)
+
+    def _run_profile(self, duration, apply, step, dt):
+        """Drive a move along a quintic profile that takes `duration` s at 100 %.
+        The speed factor is read EVERY step, so the speed slider and the safety
+        slow-down act in the middle of a move; at 0 the arm holds still but keeps
+        stepping the world (so the other stations are not held up)."""
+        duration = max(float(duration), 2 * dt)
+        s = 0.0
+        while s < 1.0:
+            s = min(1.0, s + dt * self.speed_factor() / duration)
+            apply(self._quintic(s))
             step()
 
-    def move_line(self, T_goal, step, dt, speed=0.2):
-        """Straight-line TCP move at `speed` m/s (for approach, descend and lift)."""
+    def move_joint(self, q_goal, step, dt):
+        """Quintic joint-space move, timed so no joint exceeds SPEED_SCALE of its
+        rated speed at 100 % (a quintic peaks at 1.875 * travel / duration)."""
+        q0 = np.array(self.q, dtype=float)
+        q_goal = np.array(q_goal, dtype=float)
+        T = np.max(1.875 * np.abs(q_goal - q0) / (self.qd_max * SPEED_SCALE))
+
+        def apply(u):
+            self.q = q0 + u * (q_goal - q0)
+        self._run_profile(T, apply, step, dt)
+
+    def move_line(self, T_goal, step, dt, speed=0.15):
+        """Straight-line TCP move, peak `speed` m/s at 100 % (approach, descend, lift)."""
         T0 = self.fkine(self.q)
-        dist = np.linalg.norm(T_goal.t - T0.t)
-        n = max(2, int(np.ceil(dist / (speed * dt))) + 1)
-        for T in rtb.ctraj(T0, T_goal, n):
-            self.q = self.solve(T, self.q)
-            step()
+        dist = float(np.linalg.norm(T_goal.t - T0.t))
+        turn = float(abs((T0.inv() * T_goal).angvec()[0]))
+        T = 1.875 * max(dist / speed, turn / ROT_SPEED)
+
+        def apply(u):
+            self.q = self.solve(T0.interp(T_goal, u), self.q)
+        self._run_profile(T, apply, step, dt)
 
     @staticmethod
     def down_pose(x, y, z, yaw=0.0):
