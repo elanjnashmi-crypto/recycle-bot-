@@ -43,6 +43,9 @@ SERVO_TOL_XY = 0.006        # m, grasp when the gripper is within 6 mm of the it
 SERVO_TOL_Z = 0.004         # m, ... and within 4 mm of grasp height
 SERVO_TIMEOUT = 4.0         # s, give up on an item if the servo hasn't converged
 
+CAMERA_POS = (-0.45, 0.50, 2.00)   # m, camera body, looking straight down at the cross line
+CAMERA_POLE_XY = (-0.45, 0.95)     # pole behind the cross line, outside the FANUC's reach
+
 # ---- collision avoidance -----------------------------------------------------
 PATH_SAMPLES = 30           # poses checked along every planned joint move
 VIA_MAX_Z = 1.45            # m, highest TCP height tried when going over an obstacle
@@ -92,6 +95,22 @@ class OverheadCamera:
         self.frame = 0
         self.rng = np.random.default_rng(1)
 
+    def add_model(self, env, pos=CAMERA_POS, pole_xy=CAMERA_POLE_XY):
+        """Draw the camera: a body on a mounting pole (high enough to stay clear of
+        the arm), and a faint blue patch on the belt showing its field of view."""
+        dark, blue = (0.12, 0.12, 0.14, 1), (0.25, 0.55, 1.0, 0.18)
+        cx, cy, cz = pos
+        px, py = pole_xy
+        env.add(Cuboid([0.05, 0.05, cz + 0.05], pose=SE3(px, py, (cz + 0.05) / 2), color=dark))      # pole
+        arm = float(np.hypot(cx - px, cy - py))
+        env.add(Cuboid([0.04, arm, 0.04], pose=SE3((cx + px) / 2, (cy + py) / 2, cz + 0.05)
+                       * SE3.Rz(float(np.arctan2(cx - px, -(cy - py)))), color=dark))                   # arm
+        env.add(Cuboid([0.14, 0.09, 0.07], pose=SE3(cx, cy, cz), color=dark))                         # body
+        env.add(Cylinder(0.03, 0.04, pose=SE3(cx, cy, cz - 0.05), color=(0.05, 0.05, 0.05, 1)))      # lens
+        s_mid = (self.s_from + self.s_to) / 2
+        env.add(Cuboid([self.s_to - self.s_from, self.belt.width, 0.002],
+                       pose=self.belt._pose(s_mid, z=BELT_HEIGHT + 0.004), color=blue))               # field of view
+
     def estimate(self, shape):
         tr = self.track.get(id(shape))
         if tr is None or tr[2] < self.frame:
@@ -139,6 +158,7 @@ class ClassifyCell:
         s_drop = self.cross.progress(np.array([world.conveyors["main_line"].end[0], y_belt, BELT_HEIGHT]))
         s_last = self.cross.progress(np.array([LAST_CHANCE_X - 0.40, y_belt, BELT_HEIGHT]))
         self.camera = OverheadCamera(world, self.cross, s_drop - 0.25, s_last)
+        self.camera.add_model(self.env)
         self.known = set()                  # id(shape) of every item the camera has classified
         self.queue = []                     # (shape, material) plastic/metal items waiting to be picked
 
