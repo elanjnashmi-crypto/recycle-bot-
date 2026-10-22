@@ -134,8 +134,8 @@ class GeneralBin:
                 break
         return x, y
 
-    def spawn_item(self, world, placed=()):
-        kind = self._next_kind()
+    def spawn_item(self, world, placed=(), kind=None):
+        kind = kind or self._next_kind()
         spec = RUBBISH_ITEMS[kind]
         r, h = spec["radius"], spec["height"]
         x, y = self._random_point(r, placed)
@@ -333,12 +333,48 @@ class InfeedCell:
         self._line((px, py, place_hover), stage, pyaw)      # back out the way we came in
         self._move_joint(self.q_wait)
 
+    # ---------- what to pick next (control panel: Auto / Manual feed) ----------
+    def _set_status(self, text):
+        self.world.infeed_status = text           # shown on the control panel
+
+    def _next_item(self):
+        """Auto feed: whatever is first in the tub. Manual feed: only what the operator
+        chose on the control panel (world.request_pick); None while nothing is queued."""
+        w = self.world
+        if getattr(w, "auto_feed", True):
+            return self.items_in_bin[0]
+        reqs = getattr(w, "pick_requests", None)
+        kind = None
+        try:
+            if reqs:
+                kind = reqs.popleft() if hasattr(reqs, "popleft") else reqs.pop(0)
+        except IndexError:                        # the panel cleared the queue just now
+            kind = None
+        if kind is None:
+            return None
+        for it in self.items_in_bin:
+            if it.kind == kind:
+                return it
+        # none of that kind in the tub right now: put one in (the tub holds one extra)
+        item = self.bin.spawn_item(w, self.items_in_bin, kind=kind)
+        self.items_in_bin.append(item)
+        return item
+
     def run(self):
         self._move_joint(self.q_wait)
         while True:
             if not self.items_in_bin:
                 self._refill()
-            self.pick_and_place(self.items_in_bin[0])
+            item = self._next_item()
+            if item is None:                      # manual feed, nothing chosen: wait on the shared clock
+                self._set_status("Waiting for you to choose an item")
+                self.step()
+                continue
+            if not getattr(self.world, "auto_feed", True):
+                self._set_status(f"Picking {item.kind}")
+            self.pick_and_place(item)
+            if not getattr(self.world, "auto_feed", True):
+                self._set_status("Waiting for you to choose an item")
 
 
 if __name__ == "__main__":

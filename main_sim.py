@@ -127,6 +127,16 @@ def main():
     # Ctrl+C in the terminal quits straight away (Tk would otherwise swallow it).
     signal.signal(signal.SIGINT, lambda *_: os._exit(0))
 
+    # Physical e-stop button (Arduino on a USB serial port). Optional: without pyserial
+    # or an Arduino the sim still runs, using the control panel's e-stop only.
+    try:
+        from estop_button import EstopButton
+        button = EstopButton(on_estop=lambda why: world.estop(f"Physical e-stop button ({why})"))
+        button.start()
+        world.add_interlock(button.interlock)
+    except ImportError as err:
+        print(f"[main] physical e-stop button disabled ({err}). pip install pyserial to enable it.")
+
     # Control panel on the main thread (Tk needs it on macOS); the watchdog
     # moves to a background thread. Without a display, fall back to the old loop.
     threading.Thread(target=watchdog, args=(world, threads), daemon=True, name="watchdog").start()
