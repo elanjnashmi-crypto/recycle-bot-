@@ -26,6 +26,9 @@ A stack light on a pole beside every robot (and one on the gate): GREEN while
 the cell is running, RED while it is stopped (e-stop, or reset but not yet
 resumed).
 
+E-STOP STATIONS: a red mushroom e-stop button beside every robot and one
+outside the gate (modelled equipment; the working e-stop is the GUI button).
+
 A simulated person (keyboard keys on the control panel) walks up to and
 through the gate to test the curtain and the speed zone.
 
@@ -61,6 +64,18 @@ LIGHT_POLES = {
     "gate": (GATE_X[1] + 0.08, GATE_Y - 0.08),
 }
 POLE_H = 2.10
+
+# ---- e-stop stations: red mushroom buttons on yellow boxes, at hand height ----
+# One beside each robot (next to its light pole) and one OUTSIDE the gate, so an
+# operator can stop the cell without entering it.
+ESTOP_STATIONS = {
+    "Kawasaki": (0.80, 4.45),
+    "FANUC": (0.00, -1.20),
+    "Yaskawa": (1.80, 2.70),
+    "UR3e": (-1.55, -3.40),
+    "gate (outside)": (GATE_X[0] - 0.25, GATE_Y - 0.25),
+}
+ESTOP_HEIGHT = 1.05            # m, top of the button box (hand height)
 
 # Person positions (y of the body centre); x is the middle of the gate
 PERSON_STOPS = {
@@ -138,6 +153,7 @@ class SafetySystem:
         self._build_floor(env)
         self._build_curtain(env)
         self._build_stack_lights(env)
+        self._build_estop_stations(env)
         self.person = Person(env, PERSON_STOPS["outside"])
 
         world.add_interlock(self._interlock)
@@ -206,6 +222,15 @@ class SafetySystem:
                 lit = Cylinder(0.053, 0.092, color=c)
                 env.add(lit)
                 self._lamps.append((lit, pose, name))
+
+    def _build_estop_stations(self, env):
+        yellow = (0.95, 0.80, 0.05, 1)
+        for x, y in ESTOP_STATIONS.values():
+            env.add(Cuboid([0.05, 0.05, ESTOP_HEIGHT - 0.10], pose=SE3(x, y, (ESTOP_HEIGHT - 0.10) / 2),
+                           color=DARK))                                          # post
+            env.add(Cuboid([0.10, 0.10, 0.10], pose=SE3(x, y, ESTOP_HEIGHT - 0.05), color=yellow))
+            env.add(Cylinder(0.018, 0.02, pose=SE3(x, y, ESTOP_HEIGHT + 0.01), color=DARK))   # stem
+            env.add(Cylinder(0.04, 0.025, pose=SE3(x, y, ESTOP_HEIGHT + 0.03), color=RED))    # mushroom
 
     def _show_beams(self, blocked):
         for pose, ok, cut in zip(self._beam_poses, self._beams_ok, self._beams_cut):

@@ -42,8 +42,11 @@ class World:
         self.conveyors = ConveyorSystem(env)
         self.t = 0.0
         self.running = True          # single e-stop flag for the whole workcell
-        self.auto_feed = True        # False = manual spawning: the infeed stops feeding new items
+        self.auto_feed = True        # False = manual feed: the Kawasaki only picks items the GUI asks for
+        self.pick_requests = []      # manual feed: item kinds queued for the Kawasaki to pick from its tub
+        self.infeed_status = ""      # what the Kawasaki is doing, shown on the control panel
         self.slow_factor = 1.0       # <1 slows the WHOLE cell in real time (safety speed zone)
+        self.obstacles = []          # test obstacles: dict(shape, lo, hi) axis-aligned boxes (collision avoidance)
         self.active_items = []       # shapes currently belt-driven (not held by any gripper)
         self.item_info = {}          # id(shape) -> dict(kind=..., radius=..., height=...), set by whoever spawns it
         self._cond = threading.Condition(threading.RLock())
@@ -114,6 +117,12 @@ class World:
 
     def belt_speed(self):
         return self.conveyors.conveyors[0].speed
+
+    # ---------- manual feed ----------
+    def request_pick(self, kind):
+        """Manual feed: ask the Kawasaki to pick an item of this kind from its tub
+        (safe from the GUI thread; the infeed thread takes requests in order)."""
+        self.pick_requests.append(kind)
 
     # ---------- hooks / interlocks ----------
     def add_hook(self, fn):

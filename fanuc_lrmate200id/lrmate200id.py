@@ -57,6 +57,10 @@ QLIM_DEG = [(-170, 170), (-100, 145), (-70, 205), (-190, 190), (-125, 125), (-36
 QD_MAX_DEG = [450, 380, 520, 550, 545, 1000]   # rated joint speeds, deg/s (datasheet = URDF)
 SPEED_SCALE = 0.30                             # fraction of rated speed at 100 % override (was 0.50)
 ROT_SPEED = 1.5                                # rad/s, tool re-orientation during straight-line moves
+RMRC_W0 = 0.02                                 # manipulability below which RMRC adds damping
+RMRC_LAMBDA = 0.05                             # maximum damping (damped least squares)
+LINK_RADIUS = 0.05                             # m, arm links as capsules for collision checks
+GRIPPER_RADIUS = 0.05                          # m, palm + fingers
 REACH = 0.717                                  # m, datasheet
 
 # Link lengths (m), URDF joint origins
@@ -116,9 +120,14 @@ class LRMate200iD(DHRobot3D):
         self._finger_gap = FINGER_OPEN
         self._held = None
         self._held_offset = None
-        # Live speed factor 0..1, read every motion step (speed override slider x
-        # safety slow-down). None -> always full speed. 0 -> hold position.
+        # Live speed factor 0..1, read every motion step, so a move can be slowed
+        # or held part-way. None -> always full speed. 0 -> hold position.
         self.speed_fn = None
+        # Collision guard: fn(q) -> True if pose q would hit something. Checked
+        # every step of move_joint / move_line; a blocked step is held, not taken.
+        self.collision_fn = None
+        self.blocked = False
+        self._held_size = (0.0, 0.0)              # (radius, height) of the held item
 
         if base is not None:
             self.base = base
@@ -174,14 +183,39 @@ class LRMate200iD(DHRobot3D):
             self._update_gripper()
         self._run_profile(duration, apply, step, dt)
 
-    def grasp(self, obj):
-        """Rigidly attach a scene object to the gripper where it is right now."""
+    def grasp(self, obj, radius=0.0, height=0.0):
+        """Rigidly attach a scene object to the gripper where it is right now.
+        radius/height let collision checks include the held item."""
         self._held = obj
         self._held_offset = self.fkine(self.q).inv() * SE3(np.array(obj.T), check=False)
+        self._held_size = (radius, height)
 
     def release(self):
         obj, self._held = self._held, None
+        self._held_size = (0.0, 0.0)
         return obj
+
+    # ---------- collision model ----------
+    def collision_points(self, q):
+        """The arm as a set of spheres (centre, radius) for pose q: points along
+        each link (between consecutive DH frame origins), the gripper, and the
+        held item if there is one."""
+        frames = [T.t for T in self.fkine_all(q)]
+        tcp = self.fkine(q)
+        flange = (tcp * SE3(0, 0, -TCP_OFFSET)).t
+        tip = (tcp * SE3(0, 0, 0.02)).t                  # fingertips, 2 cm past the TCP
+        pts = []
+        for a, b in zip(frames[1:], frames[2:]):         # links 2..6 (link 1 is inside the pedestal top)
+            for s in np.linspace(0, 1, 4):
+                pts.append((a + s * (b - a), LINK_RADIUS))
+        for s in np.linspace(0, 1, 4):
+            pts.append((flange + s * (tip - flange), GRIPPER_RADIUS))
+        if self._held is not None:
+            r, h = self._held_size
+            c = (tcp * self._held_offset).t
+            for dz in np.linspace(-h / 2, h / 2, 3):
+                pts.append((c + np.array([0, 0, dz]), r))
+        return pts
 
     # ---------- motion ----------
     def solve(self, T, q_seed):
@@ -192,7 +226,7 @@ class LRMate200iD(DHRobot3D):
         return sol.q
 
     def speed_factor(self):
-        """Current speed factor 0..1 (override x safety); 1 when nothing is set."""
+        """Current speed factor 0..1 from speed_fn; 1 when nothing is set."""
         if self.speed_fn is None:
             return 1.0
         return min(1.0, max(0.0, float(self.speed_fn())))
@@ -210,9 +244,20 @@ class LRMate200iD(DHRobot3D):
         duration = max(float(duration), 2 * dt)
         s = 0.0
         while s < 1.0:
-            s = min(1.0, s + dt * self.speed_factor() / duration)
-            apply(self._quintic(s))
+            s_next = min(1.0, s + dt * self.speed_factor() / duration)
+            if apply(self._quintic(s_next)) is False:   # collision guard: hold this step
+                self.blocked = True
+            else:
+                self.blocked = False
+                s = s_next
             step()
+
+    def _guarded_set(self, q):
+        """Move to q unless the collision guard says q hits something."""
+        if self.collision_fn is not None and self.collision_fn(q):
+            return False
+        self.q = q
+        return True
 
     def move_joint(self, q_goal, step, dt):
         """Quintic joint-space move, timed so no joint exceeds SPEED_SCALE of its
@@ -222,7 +267,7 @@ class LRMate200iD(DHRobot3D):
         T = np.max(1.875 * np.abs(q_goal - q0) / (self.qd_max * SPEED_SCALE))
 
         def apply(u):
-            self.q = q0 + u * (q_goal - q0)
+            return self._guarded_set(q0 + u * (q_goal - q0))
         self._run_profile(T, apply, step, dt)
 
     def move_line(self, T_goal, step, dt, speed=0.15):
@@ -233,8 +278,27 @@ class LRMate200iD(DHRobot3D):
         T = 1.875 * max(dist / speed, turn / ROT_SPEED)
 
         def apply(u):
-            self.q = self.solve(T0.interp(T_goal, u), self.q)
+            return self._guarded_set(self.solve(T0.interp(T_goal, u), self.q))
         self._run_profile(T, apply, step, dt)
+
+    def rmrc_step(self, v, dt):
+        """Resolved-rate motion control, one step: turn a desired TCP velocity
+        v = [vx, vy, vz, wx, wy, wz] (world frame) into joint velocities with the
+        Jacobian, q_dot = J^T (J J^T + lambda^2 I)^-1 v (damped least squares:
+        damping only switches on near a singularity), then integrate one dt.
+        Joint speeds are capped at SPEED_SCALE of rated and joints stay in limits."""
+        q = np.array(self.q, dtype=float)
+        J = self.jacob0(q)
+        w = np.sqrt(max(np.linalg.det(J @ J.T), 0.0))           # manipulability
+        lam2 = 0.0 if w >= RMRC_W0 else (1 - (w / RMRC_W0) ** 2) * RMRC_LAMBDA ** 2
+        qd = J.T @ np.linalg.solve(J @ J.T + lam2 * np.eye(6), np.asarray(v, dtype=float))
+        qd_lim = self.qd_max * SPEED_SCALE
+        scale = np.max(np.abs(qd) / qd_lim)
+        if scale > 1.0:                                           # keep the direction, slow it down
+            qd = qd / scale
+        q_new = np.clip(q + qd * dt, self.qlim[0] + 1e-3, self.qlim[1] - 1e-3)
+        self.q = q_new
+        return w
 
     @staticmethod
     def down_pose(x, y, z, yaw=0.0):
