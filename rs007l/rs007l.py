@@ -1,12 +1,4 @@
-"""
-Kawasaki RS007L -- Max's personally modelled 6DOF industrial arm.
-
-Not Universal Robots, not in Peter Corke's RTB catalogue, not in the 41013
-ir_support / ir_support_extra_robots pack (checked against both before this
-was chosen -- see project notes). Used as the infeed/bin-picking station:
-it lifts items out of a general rubbish tub and sets them down at the start
-of main_line for the rest of the workcell to process.
-"""
+#lifts items from the general pickup spot onto the conveyor belt
 import os
 from math import pi
 
@@ -33,11 +25,9 @@ class RS007L(DHRobot3D):
             link3="RS007L_J3", color3=GREEN,   # elbow housing
             link4="RS007L_J4", color4=WHITE,   # forearm
             link5="RS007L_J5", color5=GREEN,   # wrist
-            link6="RS007L_J6", color6=BLACK,   # tool flange
+            link6="RS007L_J6", color6=BLACK,   # tool attachment point
         )
 
-        # Pose of each mesh in the world when q = qtest (arm straight up).
-        # Every mesh is rotated 90 deg about z and lifted to its joint height.
         qtest = [0, 0, 0, 0, 0, 0]
         qtest_transforms = [spb.transl(0, 0, z) @ spb.trotz(pi / 2)
                             for z in (0.0, 0.360, 0.360, 0.815, 1.290, 1.290, 1.368)]
@@ -50,12 +40,12 @@ class RS007L(DHRobot3D):
             self.base = base
         self.q = qtest
 
-    def _create_DH(self):
-        d     = [0.360, 0,     0,      0.475,  0,      0.078]
-        a     = [0,     0.455, 0,      0,      0,      0]
-        alpha = [pi/2,  0,     pi/2,  -pi/2,   pi/2,   0]
-        offset = [0,    pi/2,  pi/2,   0,      0,      0]
-        qlim_deg = [180, 135, 157, 200, 125, 360]
+    def _create_DH(self): #j1,2,3,4,5,6
+        d     = [0.360, 0,     0,      0.475,  0,      0.078] #how far to slide relative to the previous joint
+        a     = [0,     0.455, 0,      0,      0,      0] #normal to the previous joint's axis, how far to slide along that axis
+        alpha = [pi/2,  0,     pi/2,  -pi/2,   pi/2,   0] #how much to twist
+        offset = [0,    pi/2,  pi/2,   0,      0,      0] #joint range offset (for revolute joints, this is the angle at which the joint is considered to be at 0)
+        qlim_deg = [180, 135, 157, 200, 125, 360] #limit of degrees of rotation for each joint
         return [rtb.RevoluteDH(d=d[i], a=a[i], alpha=alpha[i], offset=offset[i],
                                qlim=np.radians([-qlim_deg[i], qlim_deg[i]]))
                 for i in range(6)]
