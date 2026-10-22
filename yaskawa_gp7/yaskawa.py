@@ -1,16 +1,3 @@
-"""
-Yaskawa Motoman GP7 with a parallel-jaw gripper (Swift, Python).
-
-Kinematics, joint limits and meshes come from ROS-Industrial's
-motoman_gp7_support package (github.com/ros-industrial/motoman, kinetic-devel):
-shoulder 0.330 m above the floor, upper arm 0.445 m, forearm 0.440 m,
-wrist-to-flange 0.080 m, 927 mm reach, 7 kg payload.
-
-Usage:
-    robot = GP7(base=SE3(1.9, 1.7, 0))
-    robot.add_to_env(env)
-    robot.move_joint(q_goal, step)    # step() advances the world one dt
-"""
 #Dom's Bot
 
 import os
@@ -28,11 +15,16 @@ YASKAWA_BLUE = (0.10, 0.32, 0.68, 1.0)
 DARK_GREY = (0.20, 0.20, 0.22, 1.0)
 LIGHT_GREY = (0.75, 0.75, 0.78, 1.0)
 
-# From the GP7 URDF. J1 is +/-170 deg on the real robot (340 deg total);
-# raise it to 180 here if you want a full turn in simulation.
+# From the GP7 URDF.
 QLIM_DEG = [(-170, 170), (-65, 145), (-70, 190), (-190, 190), (-135, 135), (-360, 360)]
 QD_MAX_DEG = [375, 315, 410, 550, 550, 1000]   # rated joint speeds, deg/s
 SPEED_SCALE = 0.3125                           # fraction of rated speed used for moves
+ROT_SPEED = 1.5                                # rad/s, tool re-orientation during straight-line moves
+RMRC_W0 = 0.02                                 # manipulability below which RMRC adds damping
+RMRC_LAMBDA = 0.05                             # maximum damping (damped least squares)
+LINK_RADIUS = 0.07                             # m, arm links as capsules for collision checks
+GRIPPER_RADIUS = 0.06                          # m, palm + fingers
+REACH = 0.927                                  # m, datasheet
 
 # Arm up, forearm forward, tool pointing straight down
 HOME_Q = [0, 0, 0, 0, -pi / 2, 0]
@@ -59,9 +51,7 @@ class GP7(DHRobot3D):
             link6="gp7_link_6_t", color6=DARK_GREY,
         )
 
-        # Pose of each mesh in the world when q = qtest. The ROS meshes are drawn
-        # in their URDF link frames, which at q = 0 are all world-aligned
-        # (upper arm vertical, forearm horizontal along +x), so only translations.
+        # Pose of each mesh in the world when q = qtest.
         qtest = [0, 0, 0, 0, 0, 0]
         qtest_transforms = [spb.transl(x, 0, z)
                             for x, z in ((0, 0), (0, 0.330), (0.040, 0.330), (0.040, 0.775),
@@ -71,8 +61,7 @@ class GP7(DHRobot3D):
         super().__init__(links, link3D_names, name="GP7", link3d_dir=mesh_dir,
                          qtest=qtest, qtest_transforms=qtest_transforms)
 
-        # The last DH frame's z points back into the wrist; flip it so tool z
-        # points out of the flange, then move out to the gripper's TCP.
+        # The last DH frame's z points back into the wrist
         self.tool = SE3.Rx(pi) * SE3(0, 0, TCP_OFFSET)
         self.qd_max = np.radians(QD_MAX_DEG)
 
@@ -82,6 +71,11 @@ class GP7(DHRobot3D):
         self._finger_gap = FINGER_OPEN
         self._held = None
         self._held_offset = None
+        self.speed_fn = None
+        # Collision guard
+        self.collision_fn = None
+        self.blocked = False
+        self._held_size = (0.0, 0.0)              # (radius, height) of the held item
 
         if base is not None:
             self.base = base
@@ -99,8 +93,6 @@ class GP7(DHRobot3D):
 
     # ---------- scene ----------
     def __setattr__(self, name, value):
-        # DHRobot3D redraws the meshes *before* storing the new q, so they lag
-        # one step behind. Store first, then redraw arm, gripper and payload.
         rtb.DHRobot.__setattr__(self, name, value)
         if name in ("q", "base") and "_relation_matrices" in self.__dict__:
             self._update_3dmodel()
@@ -129,20 +121,41 @@ class GP7(DHRobot3D):
     def set_gripper(self, half_gap, step, dt, duration=0.32):
         """Open/close the fingers to `half_gap` (m from the TCP) over `duration` s."""
         start = self._finger_gap
-        n = max(2, int(np.ceil(duration / dt)))
-        for gap in np.linspace(start, half_gap, n):
-            self._finger_gap = gap
-            self._update_gripper()
-            step()
 
-    def grasp(self, obj):
+        def apply(u):
+            self._finger_gap = start + u * (half_gap - start)
+            self._update_gripper()
+        self._run_profile(duration, apply, step, dt)
+
+    def grasp(self, obj, radius=0.0, height=0.0):
         """Rigidly attach a scene object to the gripper where it is right now."""
         self._held = obj
         self._held_offset = self.fkine(self.q).inv() * SE3(np.array(obj.T), check=False)
+        self._held_size = (radius, height)
 
     def release(self):
         obj, self._held = self._held, None
+        self._held_size = (0.0, 0.0)
         return obj
+
+    # ---------- collision model ----------
+    def collision_points(self, q):
+        frames = [T.t for T in self.fkine_all(q)]
+        tcp = self.fkine(q)
+        flange = (tcp * SE3(0, 0, -TCP_OFFSET)).t
+        tip = (tcp * SE3(0, 0, 0.02)).t                  # fingertips, 2 cm past the TCP
+        pts = []
+        for a, b in zip(frames[1:], frames[2:]):         # links 2..6 (link 1 sits on the pedestal)
+            for s in np.linspace(0, 1, 4):
+                pts.append((a + s * (b - a), LINK_RADIUS))
+        for s in np.linspace(0, 1, 4):
+            pts.append((flange + s * (tip - flange), GRIPPER_RADIUS))
+        if self._held is not None:
+            r, h = self._held_size
+            c = (tcp * self._held_offset).t
+            for dz in np.linspace(-h / 2, h / 2, 3):
+                pts.append((c + np.array([0, 0, dz]), r))
+        return pts
 
     # ---------- motion ----------
     def solve(self, T, q_seed):
@@ -152,24 +165,69 @@ class GP7(DHRobot3D):
             raise RuntimeError(f"GP7 cannot reach\n{T}")
         return sol.q
 
-    def move_joint(self, q_goal, step, dt):
-        """Quintic joint-space move, timed so no joint exceeds SPEED_SCALE of its
-        rated speed (a quintic peaks at 1.875 * travel / duration)."""
-        q0 = np.array(self.q, dtype=float)
-        q_goal = np.array(q_goal, dtype=float)
-        T = max(np.max(1.875 * np.abs(q_goal - q0) / (self.qd_max * SPEED_SCALE)), 2 * dt)
-        for q in rtb.jtraj(q0, q_goal, int(np.ceil(T / dt)) + 1).q:
-            self.q = q
+    def speed_factor(self):
+        """Current speed factor 0..1 from speed_fn; 1 when nothing is set."""
+        if self.speed_fn is None:
+            return 1.0
+        return min(1.0, max(0.0, float(self.speed_fn())))
+
+    @staticmethod
+    def _quintic(s):
+        """Smooth 0->1 progress (zero velocity and acceleration at both ends)."""
+        return s ** 3 * (10 - 15 * s + 6 * s * s)
+
+    def _run_profile(self, duration, apply, step, dt):
+        duration = max(float(duration), 2 * dt)
+        s = 0.0
+        while s < 1.0:
+            s_next = min(1.0, s + dt * self.speed_factor() / duration)
+            if apply(self._quintic(s_next)) is False:   # collision guard: hold this step
+                self.blocked = True
+            else:
+                self.blocked = False
+                s = s_next
             step()
 
-    def move_line(self, T_goal, step, dt, speed=0.19):
-        """Straight-line TCP move at `speed` m/s (for approach, descend and lift)."""
+    def _guarded_set(self, q):
+        """Move to q unless the collision guard says q hits something."""
+        if self.collision_fn is not None and self.collision_fn(q):
+            return False
+        self.q = q
+        return True
+
+    def move_joint(self, q_goal, step, dt):
+        q0 = np.array(self.q, dtype=float)
+        q_goal = np.array(q_goal, dtype=float)
+        T = np.max(1.875 * np.abs(q_goal - q0) / (self.qd_max * SPEED_SCALE))
+
+        def apply(u):
+            return self._guarded_set(q0 + u * (q_goal - q0))
+        self._run_profile(T, apply, step, dt)
+
+    def move_line(self, T_goal, step, dt, speed=0.35):
+        """Straight-line TCP move, `speed` m/s peak (for approach, descend and lift)."""
         T0 = self.fkine(self.q)
-        dist = np.linalg.norm(T_goal.t - T0.t)
-        n = max(2, int(np.ceil(dist / (speed * dt))) + 1)
-        for T in rtb.ctraj(T0, T_goal, n):
-            self.q = self.solve(T, self.q)
-            step()
+        dist = float(np.linalg.norm(T_goal.t - T0.t))
+        turn = float(abs((T0.inv() * T_goal).angvec()[0]))
+        T = 1.875 * max(dist / speed, turn / ROT_SPEED)
+
+        def apply(u):
+            return self._guarded_set(self.solve(T0.interp(T_goal, u), self.q))
+        self._run_profile(T, apply, step, dt)
+
+    def rmrc_step(self, v, dt):
+        """One resolved-rate step: TCP twist v (vx, vy, vz, wx, wy, wz) -> joint rates."""
+        q = np.array(self.q, dtype=float)
+        J = self.jacob0(q)
+        w = np.sqrt(max(np.linalg.det(J @ J.T), 0.0))           # manipulability
+        lam2 = 0.0 if w >= RMRC_W0 else (1 - (w / RMRC_W0) ** 2) * RMRC_LAMBDA ** 2
+        qd = J.T @ np.linalg.solve(J @ J.T + lam2 * np.eye(6), np.asarray(v, dtype=float))
+        qd_lim = self.qd_max * SPEED_SCALE
+        scale = np.max(np.abs(qd) / qd_lim)
+        if scale > 1.0:                                           # keep the direction, slow it down
+            qd = qd / scale
+        self.q = np.clip(q + qd * dt, self.qlim[0] + 1e-3, self.qlim[1] - 1e-3)
+        return w
 
     @staticmethod
     def down_pose(x, y, z, yaw=0.0):

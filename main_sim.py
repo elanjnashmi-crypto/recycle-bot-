@@ -1,8 +1,6 @@
 import sys
 import types
 
-# macOS: the 'keyboard' package (imported by ir_support) crashes Python on
-# import (bus error). This project never uses it, so give it a harmless stand-in.
 if sys.platform == "darwin" and "keyboard" not in sys.modules:
     class _NoKeyboard(types.ModuleType):
         def __getattr__(self, name):
@@ -21,10 +19,7 @@ import swift
 DT = 0.05
 WATCHDOG_PERIOD = 4.0          # s of wall time with no clock progress before a stack dump
 
-# Which UR3e station sits at the end of plastic_line. Only ONE of these can be
-# used (they occupy the same spot):
-#   "team" -> ur3e_cell.UR3eCell          (the group's version)
-#   "mine" -> ur3e_plastic_cell.UR3eCell  (bench + crate version, elbow-up planner)
+# Which UR3e station sits at the end of plastic_line.
 UR3E_IMPL = "team"
 
 # (display name, module, class). Order = thread start order.
@@ -64,7 +59,6 @@ def run_station(station, world):
 
 
 def watchdog(world, threads):
-    """Main-thread loop: if the clock stops advancing, show where each thread is stuck."""
     last_t, last_change = world.t, time.time()
     while any(t.is_alive() for t in threads):
         time.sleep(0.5)
@@ -87,9 +81,7 @@ def main():
 
     env = swift.Swift()
     try:
-        # Building four robots takes a while with no Swift traffic. Newer Swift
-        # versions close the browser tab after a few seconds of silence, which
-        # makes the next env.add() time out -- so turn that timer off.
+        # Building four robots takes a while with no Swift traffic.
         env.launch(realtime=True, browser_timeout=None)
     except TypeError:                 # older Swift without that option
         env.launch(realtime=True)
@@ -107,10 +99,9 @@ def main():
         return
 
     for _ in stations:
-        world.register()              # all registered BEFORE any thread starts, so rounds wait for everyone
-    # Safety (fence, light curtain, speed zone, stack lights) is added before any
-    # station thread starts, so it can still touch Swift directly.
+        world.register()
     fanuc = next((s for s in stations if type(s).__name__ == "ClassifyCell"), None)
+    yaskawa = next((s for s in stations if type(s).__name__ == "SortingCell"), None)
     safety = None
     try:
         from safety import SafetySystem
@@ -124,14 +115,12 @@ def main():
     for t in threads:
         t.start()
 
-    # Ctrl+C in the terminal quits straight away (Tk would otherwise swallow it).
     signal.signal(signal.SIGINT, lambda *_: os._exit(0))
 
-    # Control panel on the main thread (Tk needs it on macOS); the watchdog
-    # moves to a background thread. Without a display, fall back to the old loop.
+    # Control panel on the main thread (Tk needs it on macOS)
     threading.Thread(target=watchdog, args=(world, threads), daemon=True, name="watchdog").start()
     from control_panel import run_panel
-    if not run_panel(world, fanuc, safety):
+    if not run_panel(world, fanuc, safety, yaskawa):
         for t in threads:
             t.join()
 

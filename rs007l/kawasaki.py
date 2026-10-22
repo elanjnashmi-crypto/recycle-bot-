@@ -29,7 +29,6 @@ class RS007L(DHRobot3D):
         )
 
         # Pose of each mesh in the world when q = qtest (arm straight up).
-        # Every mesh is rotated 90 deg about z and lifted to its joint height.
         qtest = [0, 0, 0, 0, 0, 0]
         qtest_transforms = [spb.transl(0, 0, z) @ spb.trotz(pi / 2)
                             for z in (0.0, 0.360, 0.360, 0.815, 1.290, 1.290, 1.368)]

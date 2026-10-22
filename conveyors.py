@@ -1,22 +1,3 @@
-"""
-Conveyor belts for the recycle-bot workcell (Swift, Python).
-
-Layout follows the hand sketch: world origin at the FANUC base, x to the right
-of the sketch, y towards the top of the sketch, z up. All units are metres.
-Edit LAYOUT below to move or resize belts; everything else adapts.
-
-Usage:
-    import swift
-    from environment.conveyors import ConveyorSystem
-
-    env = swift.Swift(); env.launch(realtime=True)
-    conveyors = ConveyorSystem(env)
-    items = [...]                      # spatialgeometry shapes sitting on belts
-    while True:
-        conveyors.step(0.05, items)    # call once per sim step
-        env.step(0.05)
-"""
-
 import numpy as np
 from spatialmath import SE3
 from spatialgeometry import Cuboid
@@ -26,12 +7,7 @@ BELT_THICK = 0.04
 DEFAULT_WIDTH = 0.40
 DEFAULT_SPEED = 0.15    # m/s
 
-# Ordered upstream -> downstream. At a transfer the receiving belt starts
-# under the end of the feeding belt; where they overlap, the later
-# (downstream) belt takes over the item.
-# name: (start_xy, end_xy) -- items flow from start to end.
-# The cross line and the plastic/metal line starts sit within the FANUC LR Mate
-# 200iD's 717 mm reach (datasheet) of its stand at the origin -- see fanuc_cell.py.
+# Ordered upstream -> downstream.
 LAYOUT = {
     "main_line":    ((-0.10,  3.40), (-0.10,  0.50)),  # Kawasaki places items here
     "cross_line":   (( 0.60,  0.50), (-2.00,  0.50)),  # FANUC picks plastic/metal from here
@@ -42,22 +18,12 @@ LAYOUT = {
     "metal_return": (( 2.50, -3.10), ( 2.50,  1.80)),  # up to the Al / non-Al sorting robot
 }
 
-# Belts that stop items at their end (a deposit bin or a robot pick point)
-# instead of letting them run off.
 END_STOPS = {"general_line", "plastic_line", "metal_return"}
 
 RAIL_W = 0.03           # side rail thickness
 
 
 def _junctions(layout, width=DEFAULT_WIDTH):
-    """Where one belt feeds another, work out how the two should be DRAWN so
-    they don't overlap: the feeding belt stops at the receiving belt's side
-    rail, and the receiving belt's rail gets an opening where items come in.
-
-    Only drawing changes -- each belt still *carries* items all the way to its
-    LAYOUT end point, so items are pushed onto the next belt exactly as before.
-    Returns {name: (draw_length, {side: [(s_from, s_to), ...]})}.
-    """
     belts = {}
     for name, (a, b) in layout.items():
         a, b = np.array(a, float), np.array(b, float)
@@ -104,9 +70,6 @@ class Conveyor:
         self.speed = speed
         self.stop_at_end = stop_at_end
         self.yaw = np.arctan2(self.dir[1], self.dir[0])
-        # Drawn length can be shorter than the carrying length where this belt
-        # feeds onto another one (see _junctions); rail_gaps open the side rail
-        # where another belt feeds in.
         self.draw_length = self.length if draw_length is None else draw_length
         self.rail_gaps = rail_gaps or {+1: [], -1: []}
         self._stripe_offset = 0.0
@@ -196,14 +159,16 @@ class Conveyor:
 
     def animate(self, dt):
         self._stripe_offset = (self._stripe_offset + self.speed * dt) % self.stripe_spacing
+        if not hasattr(self, "_stripe_T"):                # stripe orientation never changes
+            self._stripe_T = self._pose(0.0, z=BELT_HEIGHT + 0.001).A
+        T = self._stripe_T
         for i, stripe in enumerate(self.stripes):
             s = (i * self.stripe_spacing + self._stripe_offset) % self.draw_length
-            stripe.T = self._pose(s, z=BELT_HEIGHT + 0.001).A
+            T[:2, 3] = self.start[:2] + s * self.dir[:2]
+            stripe.T = T
 
 
 class ConveyorSystem:
-    """All belts in LAYOUT, with one running flag for e-stop / light-curtain stops."""
-
     def __init__(self, env, layout=LAYOUT, speed=DEFAULT_SPEED):
         joins = _junctions(layout)
         self.conveyors = [

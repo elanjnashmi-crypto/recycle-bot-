@@ -1,4 +1,3 @@
-
 from spatialmath import SE3
 from spatialgeometry import Cuboid
 

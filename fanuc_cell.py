@@ -2,8 +2,6 @@ import queue
 import sys
 import types
 
-# macOS: the 'keyboard' package (imported by ir_support) crashes Python on
-# import. This project never uses it, so give it a harmless stand-in.
 if sys.platform == "darwin" and "keyboard" not in sys.modules:
     class _NoKeyboard(types.ModuleType):
         def __getattr__(self, name):
@@ -23,24 +21,21 @@ from fanuc_lrmate200id.lrmate200id import LRMate200iD, FINGER_OPEN, FINGER_LEN, 
 
 DT = 0.05
 
-# ---- station layout (world frame, metres) ----------------------------------
-# Stand between plastic_line and metal_line, just below the cross line (see
-# sketch). conveyors.py puts the world origin at the FANUC base.
-PEDESTAL_HEIGHT = 0.60      # best IK margin over all pick/place points (checked 0.45-0.75 m)
+PEDESTAL_HEIGHT = 0.60
 FANUC_BASE = SE3(0.0, 0.0, PEDESTAL_HEIGHT)
 PEDESTAL_SIZE = 0.30
 
 APPROACH = 0.12             # clearance above the tallest item for the waiting pose
 TALLEST_ITEM = 0.20         # tallest item the infeed produces (plastic_bottle)
 PICK_WINDOW_X = -0.18       # gripper waits above this x on the cross line
-TRIGGER_AHEAD = 0.02        # start the tracking descent this far before the item is under the gripper
-LAST_CHANCE_X = -0.24       # item already past this x when the robot is free -> let it go
+TRIGGER_AHEAD = 0.02
+LAST_CHANCE_X = -0.24
 DESCEND_SPEED = 0.30        # m/s, max descent speed while servoing onto a moving item
-BELT_SPEED_REF = 0.15       # m/s, belt speed DESCEND_SPEED was tuned for (scaled up for faster belts)
+BELT_SPEED_REF = 0.15
 
 # ---- visual servoing + RMRC (the moving-item pick) -------------------------
 KP_XY = 8.0                 # 1/s, gain on the camera's gripper-to-item position error
-KP_Z = 12.0                 # 1/s, gain on the height error (high: come down at full speed, settle fast)
+KP_Z = 12.0
 KR = 3.0                    # 1/s, gain that keeps the gripper pointing straight down
 CAM_NOISE = 0.001           # m, camera position noise (1 mm, one standard deviation)
 CAM_VEL_FILTER = 0.5        # weight of each new frame in the camera's velocity estimate
@@ -52,22 +47,20 @@ SERVO_TIMEOUT = 4.0         # s, give up on an item if the servo hasn't converge
 PATH_SAMPLES = 30           # poses checked along every planned joint move
 VIA_MAX_Z = 1.45            # m, highest TCP height tried when going over an obstacle
 REPLAN_EVERY = 0.5          # s, while blocked, re-check this often
-PLACE_OPTIONS = (0.15, 0.40)  # m along the output line: normal drop spot, then the backup spot
+PLACE_OPTIONS = (0.15, 0.40)
 # ---- teach / jog (manual mode) ----------------------------------------------
-T1_TCP_SPEED = 0.25         # m/s, manual-mode TCP speed limit (ISO 10218-1 reduced speed, "T1")
+T1_TCP_SPEED = 0.25
 T1_JOINT_SCALE = 0.10       # manual joint speed, fraction of rated
-SAFE_X = (-0.80, 0.80)      # manual-mode safe zone for the TCP (like FANUC DCS position check)
+SAFE_X = (-0.80, 0.80)
 SAFE_Y = (-0.70, 0.85)
 SAFE_Z = (BELT_HEIGHT + 0.03, 1.60)
 FINGERTIP_BELOW_TCP = PALM_LEN + FINGER_LEN - TCP_OFFSET
 LIFT_SPEED = 0.25           # m/s peak, lift off the belt (at 100 %)
 PLACE_SPEED = 0.18          # m/s peak, lower onto the plastic/metal line (at 100 %)
-PLACE_PROGRESS = 0.15       # m along plastic/metal line from its start where items are placed
+PLACE_PROGRESS = 0.15
 GRASP_BELOW_TOP = FINGER_LEN - 0.01   # TCP stops this far below the item's top
 
-# Fallback only: the infeed now tags every item with its "material"
-# (infeed_cell.RUBBISH_ITEMS), which the camera uses first. Anything not
-# listed here and not tagged -> "general".
+# Fallback only
 MATERIAL_OF = {
     "plastic_bottle": "plastic",
     "drink_can": "metal",
@@ -76,7 +69,7 @@ MATERIAL_OF = {
 }
 TARGET_LINE = {"plastic": "plastic_line", "metal": "metal_line"}
 
-# Standalone test items: name -> (shape, radius / half-extent, height, colour)
+# Standalone test items
 TEST_ITEMS = {
     "plastic_bottle": ("cyl", 0.035, 0.20, (0.20, 0.70, 0.90, 1)),
     "cardboard_box":  ("box", 0.10,  0.10, (0.75, 0.55, 0.30, 1)),
@@ -86,35 +79,26 @@ TEST_ITEMS = {
 
 
 class PathBlocked(Exception):
-    """Raised inside a planned move when an obstacle has appeared in the way and
-    the guard has held the arm for REPLAN_EVERY seconds: _go() then replans."""
+    pass
 
 
 class OverheadCamera:
-    """Simulated vision sensor looking down at a stretch of the cross line.
-    Reports the material of every item inside its field of view. (In the sim
-    the 'image recognition' is the kind the spawner tagged the item with.)"""
-
     def __init__(self, world, belt, s_from, s_to):
         self.world = world
         self.belt = belt
         self.s_from, self.s_to = s_from, s_to
         self.seen = {}                      # id(shape) -> material (each item classified once)
-        self.track = {}                     # id(shape) -> (measured position, estimated velocity, frame)
+        self.track = {}
         self.frame = 0
         self.rng = np.random.default_rng(1)
 
     def estimate(self, shape):
-        """Camera's current measurement of an item: (position, velocity), or None
-        if the item is not in view this frame."""
         tr = self.track.get(id(shape))
         if tr is None or tr[2] < self.frame:
             return None
         return tr[0], tr[1]
 
     def scan(self):
-        """One camera frame (called every 0.05 s): classify new items and update
-        each visible item's measured position and filtered velocity."""
         found = []
         self.frame += 1
         for shape in list(self.world.active_items):
@@ -131,9 +115,7 @@ class OverheadCamera:
             self.track[key] = (meas, v, self.frame)
             if key not in self.seen:
                 info = self.world.get_item_info(shape) or {}
-                # Prefer the material the infeed tagged the item with; fall back to the
-                # kind lookup for items spawned by older test code. Anything that isn't
-                # plastic or metal (organic, cardboard, glass...) is left as "general".
+                # Prefer the material the infeed tagged the item with
                 material = info.get("material") or MATERIAL_OF.get(info.get("kind"), "general")
                 self.seen[key] = material if material in TARGET_LINE else "general"
             found.append((shape, self.seen[key]))
@@ -153,7 +135,6 @@ class ClassifyCell:
         self.robot = LRMate200iD(base=FANUC_BASE)
         self.robot.add_to_env(self.env)
 
-        # Camera covers the cross line from where main_line drops items to just past the pick window
         y_belt = self.cross.start[1]
         s_drop = self.cross.progress(np.array([world.conveyors["main_line"].end[0], y_belt, BELT_HEIGHT]))
         s_last = self.cross.progress(np.array([LAST_CHANCE_X - 0.40, y_belt, BELT_HEIGHT]))
@@ -164,12 +145,11 @@ class ClassifyCell:
         self.t = 0.0
         self.counts = {"plastic": 0, "metal": 0, "general": 0, "missed": 0}
 
-        # Speed factor (1.0 = normal). The safety speed zone slows the whole cell via World instead.
+        # Speed factor (1.0 = normal).
         self.zone_factor = 1.0
         self.robot.speed_fn = lambda: self.zone_factor
 
-        # Collision avoidance: obstacles live in world.obstacles; the GUI asks for
-        # them through request_obstacle() and this thread adds them in step().
+        # Collision avoidance
         self.robot.collision_fn = lambda q: self._hits(q) is not None
         self._obstacle_requests = []
         self._clear_obstacles = False
@@ -178,8 +158,7 @@ class ClassifyCell:
         self._in_go = False                 # True while _go() is executing a planned move
         self._blocked_time = 0.0
 
-        # Teach / jog: the GUI sets requested_mode and queues jog commands; this
-        # thread switches modes between cycles, so it never drops a held item.
+        # Teach / jog
         self.mode = "auto"                  # auto | manual | to_auto
         self.requested_mode = "auto"
         self.jog_target = None              # joint target the manual loop moves towards
@@ -217,8 +196,6 @@ class ClassifyCell:
 
     # ---------- world ----------
     def step(self):
-        """Per-substep callback: camera watches the belt (also while the arm is
-        busy), spawn test items (standalone only), advance the shared clock."""
         self.t += DT
         self._handle_obstacle_requests()
         self._observe()
@@ -235,8 +212,6 @@ class ClassifyCell:
         self.world.tick()
 
     def _observe(self):
-        """Classify every new item in view; queue plastic/metal, let general go.
-        Queued items that get past the last pick point while the arm is busy are missed."""
         for shape, material in self.camera.scan():
             if id(shape) in self.known:
                 continue
@@ -286,12 +261,6 @@ class ClassifyCell:
         return 0.5 * sum(np.cross(R[:, k], R_goal[:, k]) for k in range(3))
 
     def _pick_tracking(self, shape, info):
-        """Visual servoing + RMRC onto a moving item.
-        Every 0.05 s the camera gives the item's position and velocity. The TCP
-        velocity command is: the item's velocity (feed-forward, so the gripper keeps
-        pace with the belt) + KP_XY x the camera's position error (closes the gap),
-        a capped descent towards grasp height, and an angular velocity that keeps
-        the gripper pointing down. RMRC turns that into joint velocities."""
         r = self.robot
         h = info.get("height", TALLEST_ITEM)
         z_grasp = BELT_HEIGHT + h - GRASP_BELOW_TOP
@@ -359,9 +328,6 @@ class ClassifyCell:
 
     # ---------- collision detection / avoidance ----------
     def _make_obstacle_spots(self):
-        """Two places the GUI can drop a test obstacle, both on the FANUC's real path:
-        a tall box on the cross line under the swing from the pick to the metal line,
-        and a box sitting on the metal line's drop spot."""
         r = self.robot
         q_mid = 0.5 * (np.array(self.q_wait) + np.array(self.q_place["metal"]))   # half-way through the swing
         mx, my = r.fkine(q_mid).t[:2]
@@ -416,8 +382,6 @@ class ClassifyCell:
         return None
 
     def _path_hits(self, q_from, q_to):
-        """Check the straight joint-space path from q_from to q_to (the same path
-        move_joint follows) at PATH_SAMPLES poses."""
         q_from, q_to = np.array(q_from, float), np.array(q_to, float)
         for u in np.linspace(0, 1, PATH_SAMPLES):
             ob = self._hits(q_from + u * (q_to - q_from))
@@ -426,9 +390,6 @@ class ClassifyCell:
         return None
 
     def _plan(self, q_goal):
-        """List of joint waypoints to q_goal that avoids every obstacle, or None.
-        Straight there if the path is clear; otherwise go over the obstacle: up to
-        a via height, across, and back down, trying higher via heights until clear."""
         q0 = np.array(self.robot.q, float)
         ob = self._path_hits(q0, q_goal)
         if ob is None:
@@ -449,10 +410,6 @@ class ClassifyCell:
         return None
 
     def _go(self, q_goal):
-        """Collision-checked joint move. Plans around obstacles; if there's no way
-        round, stops and waits until there is. If an obstacle appears part-way
-        through, the per-step guard stops the arm, and after REPLAN_EVERY seconds
-        it replans from where it stopped."""
         while True:
             plan = self._plan(q_goal)
             if plan is None:
@@ -481,8 +438,6 @@ class ClassifyCell:
         return self._q_place_cache[key]
 
     def _choose_place_spot(self, material, z_release):
-        """First drop spot along the output line where lowering the item would not
-        hit an obstacle. If every spot is blocked, stop and wait."""
         waited = False
         while True:
             for progress in PLACE_OPTIONS:
@@ -516,12 +471,9 @@ class ClassifyCell:
         self._jog_cmds.put(("joint", int(i), float(angle)))
 
     def jog_cartesian(self, dx, dy, dz):
-        """Manual: move the TCP by (dx, dy, dz) m in the world frame, gripper still pointing down."""
         self._jog_cmds.put(("cart", float(dx), float(dy), float(dz)))
 
     def goto_joints(self, q):
-        """Manual: planned, collision-checked move to joint angles q (rad), e.g. a
-        final joint state supplied during marking."""
         self._jog_cmds.put(("goto", np.array(q, dtype=float)))
 
     def jog_home(self):
@@ -539,8 +491,6 @@ class ClassifyCell:
 
     # ---------- teach / jog: runs in the FANUC thread ----------
     def _zone_violation(self, q):
-        """'' if pose q is allowed in manual mode, else the reason: TCP inside the
-        safe box, nothing below the belt surface, and no obstacle hit."""
         r = self.robot
         tcp = r.fkine(q).t
         for v, (lo, hi), axis in zip(tcp, (SAFE_X, SAFE_Y, SAFE_Z), "xyz"):
@@ -594,8 +544,6 @@ class ClassifyCell:
             r.set_gripper(0.02 if cmd[1] else FINGER_OPEN, self.step, DT)
 
     def _jog_step(self):
-        """One manual step towards jog_target at reduced (T1) speed, stopping at the
-        safe-zone boundary or before an obstacle."""
         r = self.robot
         q = np.array(r.q, dtype=float)
         dq = np.array(self.jog_target, dtype=float) - q

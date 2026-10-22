@@ -1,12 +1,3 @@
-"""
-Kawasaki RS007L -- Max's personally modelled 6DOF industrial arm.
-
-Not Universal Robots, not in Peter Corke's RTB catalogue, not in the 41013
-ir_support / ir_support_extra_robots pack (checked against both before this
-was chosen -- see project notes). Used as the infeed/bin-picking station:
-it lifts items out of a general rubbish tub and sets them down at the start
-of main_line for the rest of the workcell to process.
-"""
 import os
 from math import pi
 
@@ -37,7 +28,6 @@ class RS007L(DHRobot3D):
         )
 
         # Pose of each mesh in the world when q = qtest (arm straight up).
-        # Every mesh is rotated 90 deg about z and lifted to its joint height.
         qtest = [0, 0, 0, 0, 0, 0]
         qtest_transforms = [spb.transl(0, 0, z) @ spb.trotz(pi / 2)
                             for z in (0.0, 0.360, 0.360, 0.815, 1.290, 1.290, 1.368)]

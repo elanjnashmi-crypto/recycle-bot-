@@ -1,16 +1,3 @@
-"""
-Organic waste basket at the end of general_line.
-
-Organic items (the apples) that ride to the end of the belt are not left
-sitting on the end stop: they roll off the end, fall, and land in a basket
-on the floor -- a slatted plastic milk-crate. Apples pile up in it.
-
-It is a station of its own so it runs on the shared World clock like the
-others (main_sim registers it and gives it a thread). Nothing is spawned here.
-
-Which belt it watches, and which items it takes, are set by the constants
-below.
-"""
 import numpy as np
 import swift
 from spatialmath import SE3
@@ -62,16 +49,11 @@ class OrganicBasketCell:
         return np.array([p[0], p[1], z])
 
     def _bar(self, env, along, across, z, size, colour):
-        """One crate bar. along/across are offsets from the crate centre (belt
-        frame), z is the bar's centre height, size is (along, across, up)."""
         c = self._to_world(self.mid + along, across, z)
         env.add(Cuboid(list(size), pose=SE3(c[0], c[1], c[2]) * SE3.Rz(self.belt.yaw),
                        color=colour))
 
     def _build(self, env):
-        """A plastic milk-crate: slatted floor, four slatted walls with open
-        gaps between the vertical bars, a rail round the top and bottom, and
-        solid corner posts."""
         A, W, H, t = BASKET_ALONG, BASKET_ACROSS, BASKET_HEIGHT, BASKET_WALL
         self.mid = self.belt.length + BASKET_GAP
         col, dark = CRATE_COLOUR, CRATE_DARK
@@ -135,8 +117,7 @@ class OrganicBasketCell:
         across = (p - self.belt.start) @ self.belt.lateral
         z = p[2]
 
-        # Still on the belt: keep rolling at the push speed until the apple's
-        # centre is just past the end, then it drops.
+        # Still on the belt
         on_belt = along < self.belt.length + 0.01 and z >= BELT_HEIGHT
         if not on_belt:
             f.v[2] -= GRAVITY * DT

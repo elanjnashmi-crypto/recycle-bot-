@@ -28,24 +28,20 @@ CRATE_SIZE = (0.30, 0.30, 0.22)  # milk-crate footprint and height
 CRATE_COLOUR = (0.15, 0.35, 0.75, 1)
 CRATE_DARK = (0.10, 0.22, 0.50, 1)
 
-# The crate sits on a LOWER side table, not on the robot's bench: the arm only
-# reaches ~0.5 m, so a lower rim means a lower, closer release point.
+# The crate sits on a LOWER side table, not on the robot's bench
 SIDE_TABLE_TOP = 0.42           # table-top height (belt is 0.75)
 SIDE_TABLE_SIZE = 0.36
 PEDESTAL_SIZE = 0.30            # the robot stands on a pedestal at belt height
 
 GRASP_CLEARANCE = 0.02          # flange stops this far above the item top
-APPROACH = 0.08                 # hover height above item top / crate rim (small: UR3e reach)
+APPROACH = 0.08
 MOVE_STEPS = 28                 # joint-move interpolation steps (more = slower)
 LINE_STEPS = 12                 # Cartesian lower/lift steps (more = slower)
 
 ITEM_GAP = 0.15
 SPAWN_PERIOD = 10.0             # s between test items
 SPAWN_BEFORE_END = 1.0          # m before the end stop that test items appear
-# Test items are only spawned when this cell runs on its own (python ur3e_cell.py).
-# In main_sim.py the plastic comes from the FANUC station instead.
 
-# name: (radius, height, colour)  -- kept short so the UR3e can reach the top
 PLASTIC_ITEMS = {
     "water_bottle": (0.032, 0.14, (0.20, 0.70, 0.90, 1)),
     "yoghurt_tub":  (0.045, 0.08, (0.95, 0.95, 0.95, 1)),
@@ -89,7 +85,6 @@ class Crate:
         return SIDE_TABLE_TOP + CRATE_SIZE[2]
 
     def drop(self, item, step):
-        """Release: item falls to the crate floor at a random spot (stacked in layers)."""
         inner = max(0.0, self.inner - item.radius)
         x, y = (self.x, self.y) + self.rng.uniform(-inner, inner, 2)
         layer = (self.count // 4) % 3
@@ -107,17 +102,8 @@ class Crate:
 
 
 class UR3ePlanner:
-    """IK helper for a downward-pointing tool that keeps the arm elbow-up and
-    above the bench. Works with any 6-joint DH robot (uses only ikine_LM and
-    fkine_all), so it does not depend on the UTS model's joint conventions.
-
-    Plain per-target IK was not enough: consecutive targets landed in different
-    arm configurations (base angle flipping by ~150 deg, elbow near bench
-    height), and interpolating between those sweeps the arm through the bench.
-    """
-
     ELBOW_RISE = 0.03      # elbow must be at least this far above the shoulder
-    MIN_CLEAR = 0.03       # every joint (except base) at least this far above the bench
+    MIN_CLEAR = 0.03
 
     def __init__(self, robot, bench_top):
         self.robot = robot
@@ -140,13 +126,9 @@ class UR3ePlanner:
         return min(z[1:]) >= self.bench_top + self.MIN_CLEAR and z[2] >= z[1] + self.ELBOW_RISE
 
     def path_ok(self, q_a, q_b, n=10):
-        """Joint-space path stays clear of the bench. (Elbow-up is only demanded of
-        the target, so a robot starting from a flat 'zero' pose can still move.)"""
         return all(self.clear_of_bench(q) for q in rtb.jtraj(q_a, q_b, n).q)
 
     def solve(self, T, q_now, tries=12):
-        """Valid IK solution nearest to q_now whose joint-space path from q_now
-        stays clear of the bench; None if there is none."""
         q_now = np.array(q_now, dtype=float)
         yaw = np.arctan2(T.t[1] - self.robot.base.t[1], T.t[0] - self.robot.base.t[0])
         seeds = [q_now] + [np.array([yaw, -pi / 2, pi / 2, -pi / 2, -pi / 2, 0.0])
@@ -165,8 +147,6 @@ class UR3ePlanner:
         return best
 
     def line(self, xyz_from, xyz_to, yaw, q_now, steps):
-        """Straight Cartesian line (tool down). Each step is solved from the
-        previous joint state, so the motion is continuous. None if any step fails."""
         out, q = [], np.array(q_now, dtype=float)
         for s in np.linspace(0, 1, steps + 1)[1:]:
             p = (1 - s) * np.array(xyz_from) + s * np.array(xyz_to)
@@ -196,7 +176,6 @@ class UR3eCell:
         self.env = world.env
         self.belt = world.conveyors["plastic_line"]
 
-        # pedestal the robot stands on (belt height) + the low side table / crate
         bx, by = UR3E_BASE.t[0], UR3E_BASE.t[1]
         self.env.add(Cuboid([PEDESTAL_SIZE, PEDESTAL_SIZE, BENCH_TOP],
                             pose=SE3(bx, by, BENCH_TOP / 2), color=(0.45, 0.45, 0.48, 1)))
@@ -239,7 +218,6 @@ class UR3eCell:
 
     # ---------- world ----------
     def step(self):
-        """Per-substep callback: carry the held item, spawn test items, advance the shared clock."""
         self.t += DT
         if self._held_item is not None:
             self._carry(self._held_item)
@@ -249,16 +227,11 @@ class UR3eCell:
         self.world.tick()
 
     def _carry(self, item):
-        """Glue the item under the flange (item top sits at the gripper tip).
-        Only the POSITION follows the tool: the tool points straight down, so
-        copying its orientation would turn the item upside down."""
         offset = SE3(0, 0, item.height / 2 + GRASP_CLEARANCE)
         p = (self.robot.fkine(self.robot.q) * offset).t
         item.shape.T = SE3(p[0], p[1], p[2]).A
 
     def _adopt_from_belt(self):
-        """Start tracking plastic another station (FANUC) has put on plastic_line.
-        Size comes from the tag the spawner gave the item (world.tag_item)."""
         for shape in list(self.world.active_items):
             key = id(shape)
             if key in self._adopted or not self.belt.contains(np.array(shape.T)[:3, 3]):

@@ -1,34 +1,6 @@
-"""
-FANUC LR Mate 200iD (standard arm) with a parallel-jaw gripper (Swift, Python).
-
-Sources -- nothing here is guessed:
-  * Kinematics, joint limits and visual meshes: ROS-Industrial
-    fanuc_lrmate200id_support (github.com/ros-industrial/fanuc, BSD licence,
-    see meshes/LICENSE_ros-industrial_fanuc.txt), file
-    urdf/lrmate200id_macro.xacro:
-        J1 0.330 m above the base, J2 0.050 m forward of J1,
-        upper arm (J2->J3) 0.330 m, J3->J4 0.035 m, forearm (J4->J5) 0.335 m,
-        J5->flange 0.080 m.
-  * Joint speeds: FANUC LR Mate 200iD datasheet (450, 380, 520, 550, 545,
-    1000 deg/s), which match the URDF's velocity limits.
-  * Reach 717 mm, payload 7 kg: FANUC datasheet.
-    (0.050 + 0.330 + sqrt(0.335^2 + 0.035^2) = 0.717 m, so the URDF agrees.)
-
-The URDF has the same joint layout as the Yaskawa GP7 used elsewhere in this
-project (both are ROS-Industrial models), so the DH table below has the same
-form as yaskawa_gp7/yaskawa.py, just with the LR Mate's lengths. The DH model
-is checked against the URDF chain in verify_against_urdf().
-
-Usage:
-    robot = LRMate200iD(base=SE3(0, 0, 0.55))
-    robot.add_to_env(env)
-    robot.move_joint(q_goal, step, dt)    # step() advances the world one dt
-"""
 import sys
 import types
 
-# macOS: the 'keyboard' package (imported by ir_support) crashes Python on
-# import (bus error). This project never uses it, so give it a harmless stand-in.
 if sys.platform == "darwin" and "keyboard" not in sys.modules:
     class _NoKeyboard(types.ModuleType):
         def __getattr__(self, name):
@@ -91,10 +63,7 @@ class LRMate200iD(DHRobot3D):
             link6="link_6", color6=FANUC_BLACK,
         )
 
-        # Pose of each mesh (in the robot's own frame) when q = qtest. The ROS
-        # meshes are drawn in their URDF link frames, which at q = 0 are all
-        # aligned with the base (upper arm vertical, forearm along +x), so
-        # each is just the URDF joint origins summed up the chain.
+        # Pose of each mesh (in the robot's own frame) when q = qtest.
         qtest = [0, 0, 0, 0, 0, 0]
         qtest_transforms = [spb.transl(x, 0, z)
                             for x, z in ((0, 0),
@@ -109,8 +78,7 @@ class LRMate200iD(DHRobot3D):
         super().__init__(links, link3D_names, name="LRMate200iD", link3d_dir=mesh_dir,
                          qtest=qtest, qtest_transforms=qtest_transforms)
 
-        # The last DH frame's z points back into the wrist; flip it so tool z
-        # points out of the flange, then move out to the gripper's TCP.
+        # The last DH frame's z points back into the wrist
         self.tool = SE3.Rx(pi) * SE3(0, 0, TCP_OFFSET)
         self.qd_max = np.radians(QD_MAX_DEG)
 
@@ -120,11 +88,8 @@ class LRMate200iD(DHRobot3D):
         self._finger_gap = FINGER_OPEN
         self._held = None
         self._held_offset = None
-        # Live speed factor 0..1, read every motion step, so a move can be slowed
-        # or held part-way. None -> always full speed. 0 -> hold position.
         self.speed_fn = None
-        # Collision guard: fn(q) -> True if pose q would hit something. Checked
-        # every step of move_joint / move_line; a blocked step is held, not taken.
+        # Collision guard
         self.collision_fn = None
         self.blocked = False
         self._held_size = (0.0, 0.0)              # (radius, height) of the held item
@@ -146,8 +111,6 @@ class LRMate200iD(DHRobot3D):
 
     # ---------- scene ----------
     def __setattr__(self, name, value):
-        # DHRobot3D redraws the meshes *before* storing the new q, so they lag
-        # one step behind. Store first, then redraw arm, gripper and payload.
         rtb.DHRobot.__setattr__(self, name, value)
         if name in ("q", "base") and "_relation_matrices" in self.__dict__:
             self._update_3dmodel()
@@ -174,8 +137,6 @@ class LRMate200iD(DHRobot3D):
 
     # ---------- gripper ----------
     def set_gripper(self, half_gap, step, dt, duration=0.3):
-        """Open/close the fingers to `half_gap` (m from the TCP) over `duration` s
-        (at 100 % speed)."""
         start = self._finger_gap
 
         def apply(u):
@@ -184,8 +145,6 @@ class LRMate200iD(DHRobot3D):
         self._run_profile(duration, apply, step, dt)
 
     def grasp(self, obj, radius=0.0, height=0.0):
-        """Rigidly attach a scene object to the gripper where it is right now.
-        radius/height let collision checks include the held item."""
         self._held = obj
         self._held_offset = self.fkine(self.q).inv() * SE3(np.array(obj.T), check=False)
         self._held_size = (radius, height)
@@ -197,9 +156,6 @@ class LRMate200iD(DHRobot3D):
 
     # ---------- collision model ----------
     def collision_points(self, q):
-        """The arm as a set of spheres (centre, radius) for pose q: points along
-        each link (between consecutive DH frame origins), the gripper, and the
-        held item if there is one."""
         frames = [T.t for T in self.fkine_all(q)]
         tcp = self.fkine(q)
         flange = (tcp * SE3(0, 0, -TCP_OFFSET)).t
@@ -237,10 +193,6 @@ class LRMate200iD(DHRobot3D):
         return s ** 3 * (10 - 15 * s + 6 * s * s)
 
     def _run_profile(self, duration, apply, step, dt):
-        """Drive a move along a quintic profile that takes `duration` s at 100 %.
-        The speed factor is read EVERY step, so the speed slider and the safety
-        slow-down act in the middle of a move; at 0 the arm holds still but keeps
-        stepping the world (so the other stations are not held up)."""
         duration = max(float(duration), 2 * dt)
         s = 0.0
         while s < 1.0:
@@ -260,8 +212,6 @@ class LRMate200iD(DHRobot3D):
         return True
 
     def move_joint(self, q_goal, step, dt):
-        """Quintic joint-space move, timed so no joint exceeds SPEED_SCALE of its
-        rated speed at 100 % (a quintic peaks at 1.875 * travel / duration)."""
         q0 = np.array(self.q, dtype=float)
         q_goal = np.array(q_goal, dtype=float)
         T = np.max(1.875 * np.abs(q_goal - q0) / (self.qd_max * SPEED_SCALE))
@@ -271,7 +221,6 @@ class LRMate200iD(DHRobot3D):
         self._run_profile(T, apply, step, dt)
 
     def move_line(self, T_goal, step, dt, speed=0.15):
-        """Straight-line TCP move, peak `speed` m/s at 100 % (approach, descend, lift)."""
         T0 = self.fkine(self.q)
         dist = float(np.linalg.norm(T_goal.t - T0.t))
         turn = float(abs((T0.inv() * T_goal).angvec()[0]))
@@ -282,11 +231,6 @@ class LRMate200iD(DHRobot3D):
         self._run_profile(T, apply, step, dt)
 
     def rmrc_step(self, v, dt):
-        """Resolved-rate motion control, one step: turn a desired TCP velocity
-        v = [vx, vy, vz, wx, wy, wz] (world frame) into joint velocities with the
-        Jacobian, q_dot = J^T (J J^T + lambda^2 I)^-1 v (damped least squares:
-        damping only switches on near a singularity), then integrate one dt.
-        Joint speeds are capped at SPEED_SCALE of rated and joints stay in limits."""
         q = np.array(self.q, dtype=float)
         J = self.jacob0(q)
         w = np.sqrt(max(np.linalg.det(J @ J.T), 0.0))           # manipulability
@@ -307,8 +251,6 @@ class LRMate200iD(DHRobot3D):
 
     # ---------- checks ----------
     def verify_against_urdf(self, n=200, seed=0):
-        """Compare the DH model's flange pose with the URDF joint chain for
-        random joint angles. Returns the worst position error (m)."""
         def urdf_flange(q):
             def rot(axis, ang):
                 R = {"x": spb.trotx, "y": spb.troty, "z": spb.trotz}[axis[-1]]

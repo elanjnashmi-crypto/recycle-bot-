@@ -1,23 +1,3 @@
-"""
-Warehouse / recycling-plant building around the workcell (static scenery only).
-
-Everything here is drawn once, before the station threads start, and never
-moves. It stays outside the safety fence (x -2.8..3.3, y -3.7..5.0) and the
-gate's walkway, except the floor and things hung overhead (trusses, lights),
-which sit well above the robots, stack lights and fence.
-
-Layout (world frame, metres; x right, y up the sketch):
-    building shell          x -8..9, y -10..10, 6 m walls, open truss roof
-    pallet racking          along the west wall
-    recycled-material bales east of the fence
-    forklift                east aisle
-    walkway + roller door   south wall, in line with the cell gate
-
-Usage (main_sim.py, before the stations are built):
-    from factory import build_factory
-    build_factory(env)
-"""
-
 import numpy as np
 from spatialmath import SE3
 from spatialgeometry import Cuboid, Cylinder
@@ -32,7 +12,7 @@ DOOR_H = 4.0
 COLUMN_YS = (-6.0, -2.0, 2.0, 6.0)   # truss lines (columns on the east/west walls)
 COLUMN_XS = (-4.0, 4.5)              # extra columns on the north/south walls
 
-# Where Swift's camera starts: inside the south-east corner, looking at the cell
+# Where Swift's camera starts
 CAMERA_POS = [7.6, -8.6, 5.2]
 CAMERA_LOOK = [0.3, 0.6, 0.6]
 
@@ -65,7 +45,6 @@ def _box(env, size, xyz, colour, yaw=0.0):
 
 
 def _bar(env, a, b, thick, colour):
-    """Rectangular bar from point a to point b (both xy at the same z, or vertical)."""
     a, b = np.array(a, float), np.array(b, float)
     d = b - a
     L = float(np.linalg.norm(d))
@@ -84,7 +63,7 @@ def _wall_y(env, y, x_from, x_to, z_from, z_to, colour):
     _box(env, (x_to - x_from, WALL_T, z_to - z_from), ((x_from + x_to) / 2, y, (z_from + z_to) / 2), colour)
 
 
-# Wall bands bottom -> top: dark plinth, cladding, glazing strip, cladding
+# Wall bands bottom -> top
 BANDS = [(0.0, 1.2, WALL_BASE), (1.2, 4.2, CLADDING), (4.2, 5.2, GLAZING), (5.2, WALL_H, CLADDING)]
 
 
@@ -151,8 +130,7 @@ def _lights(env):
 
 # ---------- floor markings ----------
 def _markings(env):
-    # Swift's own grey ground plane (z = 0) is the concrete floor. A slab of our own
-    # just under it z-fights (flickering stripes), so paint sits clearly above it.
+    # Swift's own grey ground plane (z = 0) is the concrete floor.
     z = 0.0045
 
     def strip(x0, y0, x1, y1, w=0.10, colour=SAFETY_YELLOW):
@@ -161,7 +139,6 @@ def _markings(env):
         else:
             _box(env, (abs(x1 - x0), w, 0.003), ((x0 + x1) / 2, y0, z), colour)
 
-    # walkway from the roller door to the cell gate (stops short of the area-scanner tape)
     _box(env, (1.6, 5.15, 0.002), (0, -7.35, 0.003), WALKWAY_GREEN)
     strip(-0.85, -9.9, -0.85, -4.75)
     strip(0.85, -9.9, 0.85, -4.75)
@@ -206,7 +183,6 @@ def _racking(env, rng):
 
 
 def _bales(env, rng):
-    """Compressed bales of sorted material waiting for collection, east of the fence."""
     kinds = list(BALE_COLOURS)
     spots = [(x, y) for x in (5.3, 6.6, 7.9) for y in (-3.0, -1.4, 0.2)]
     for i, (x, y) in enumerate(spots):
@@ -224,7 +200,6 @@ def _bales(env, rng):
 
 
 def _forklift(env, x, y, yaw):
-    """Counterbalance forklift parked in the east aisle (forks point along +x of its frame)."""
     base = SE3(x, y, 0) * SE3.Rz(yaw)
 
     def part(size, xyz, colour):

@@ -1,21 +1,5 @@
-"""
-Control panel (tkinter) for the recycle-bot workcell.
-
-    E-STOP / Reset / Resume        (Esc also trips the e-stop)
-    Conveyor belt speed
-    Item feed: Auto (Kawasaki picks whatever is next in its tub) or
-               Manual (you choose which item the Kawasaki picks from the tub)
-    Collision test: drop an obstacle into the FANUC's path, or clear it
-    FANUC teach / jog: Auto or Manual; in Manual, jog each joint, jog the TCP in
-               x/y/z, type a joint state and Go (planned, collision-checked),
-               gripper, wait pose; live state and fault messages
-
-Runs on the MAIN thread (macOS only allows Tk there); the stations run in
-their own threads. The panel never touches Swift itself: it only sets flags
-and queues requests, which the World / station threads carry out. So it keeps
-working during an e-stop, when the simulation clock is frozen.
-"""
 import os
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -28,6 +12,7 @@ except Exception:                   # infeed failed to import: manual feed has n
     ITEM_KINDS = []
 
 REFRESH_MS = 100
+SIM_SPEED_RANGE = (0.5, 5.0)       # x real time
 BELT_SPEED_RANGE = (0.05, 0.25)    # m/s; above ~0.25 the FANUC can't catch items in its reach
 MODE_TEXT = {"auto": "AUTO", "manual": "MANUAL", "to_auto": "returning to auto..."}
 STATE_TEXT = {
@@ -38,8 +23,8 @@ STATE_TEXT = {
 
 
 class ControlPanel:
-    def __init__(self, root, world, fanuc=None):
-        self.root, self.world, self.fanuc = root, world, fanuc
+    def __init__(self, root, world, fanuc=None, yaskawa=None):
+        self.root, self.world, self.fanuc, self.yaskawa = root, world, fanuc, yaskawa
         root.title("Recycle-bot control panel")
         root.resizable(False, False)
         root.protocol("WM_DELETE_WINDOW", lambda: os._exit(0))
@@ -52,9 +37,11 @@ class ControlPanel:
         self.left = ttk.Frame(root, padding=8)
         self.left.grid(row=0, column=0, sticky="n")
         self._build_estop(self.left)
+        self._build_sim_speed(self.left)
         self._build_belts(self.left)
         self._build_feed(self.left)
         self._build_collision(self.left)
+        self._build_yaskawa_collision(self.left)
         self.right = ttk.Frame(root, padding=8)
         self.right.grid(row=0, column=1, sticky="n")
         self._build_jog(self.right)
@@ -80,6 +67,17 @@ class ControlPanel:
         self.reason = tk.StringVar()
         ttk.Label(box, textvariable=self.reason, wraplength=260).pack(fill="x")
         ttk.Label(box, text="Esc = e-stop    test person: 1 out, 2 zone, 3 in", foreground="#777").pack(anchor="w")
+
+    def _build_sim_speed(self, parent):
+        box = ttk.LabelFrame(parent, text="Simulation speed (x real time)", padding=8)
+        box.pack(fill="x", pady=(8, 0))
+        self.sim_speed = tk.DoubleVar(value=self.world.sim_speed)
+        tk.Scale(box, from_=SIM_SPEED_RANGE[0], to=SIM_SPEED_RANGE[1], resolution=0.5,
+                 orient="horizontal", length=260, variable=self.sim_speed,
+                 command=lambda v: self.world.set_sim_speed(float(v))).pack()
+        self.sim_speed_actual = tk.StringVar()
+        ttk.Label(box, textvariable=self.sim_speed_actual, foreground="#555").pack(anchor="w")
+        self._speed_ref = None
 
     def _build_belts(self, parent):
         box = ttk.LabelFrame(parent, text="Conveyor belt speed (m/s)", padding=8)
@@ -133,6 +131,24 @@ class ControlPanel:
             side="left", expand=True, fill="x")
         self.collision_status = tk.StringVar()
         ttk.Label(box, textvariable=self.collision_status, foreground="#555", wraplength=260).pack(anchor="w")
+
+    def _build_yaskawa_collision(self, parent):
+        box = ttk.LabelFrame(parent, text="Collision test (Yaskawa)", padding=8)
+        box.pack(fill="x", pady=(8, 0))
+        if self.yaskawa is None:
+            ttk.Label(box, text="Yaskawa cell not running").pack()
+            self.y_collision_status = None
+            return
+        spots = list(self.yaskawa.obstacle_spots)
+        self.y_spot = tk.StringVar(value=spots[0])
+        ttk.Combobox(box, textvariable=self.y_spot, values=spots, state="readonly", width=30).pack(fill="x")
+        row = ttk.Frame(box)
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Button(row, text="Drop obstacle", command=self._drop_y_obstacle).pack(side="left", expand=True, fill="x")
+        ttk.Button(row, text="Clear obstacles", command=self.yaskawa.request_clear_obstacles).pack(
+            side="left", expand=True, fill="x")
+        self.y_collision_status = tk.StringVar()
+        ttk.Label(box, textvariable=self.y_collision_status, foreground="#555", wraplength=260).pack(anchor="w")
 
     def _build_jog(self, parent):
         box = ttk.LabelFrame(parent, text="FANUC teach / jog", padding=8)
@@ -256,6 +272,10 @@ class ControlPanel:
         self.fanuc.request_obstacle(self.spot.get())
         self.msg.set(f"Obstacle requested: {self.spot.get()}")
 
+    def _drop_y_obstacle(self):
+        self.yaskawa.request_obstacle(self.y_spot.get())
+        self.msg.set(f"Obstacle requested: {self.y_spot.get()}")
+
     # ---------- actions ----------
     def _estop(self):
         self.world.estop("E-stop button pressed (control panel)")
@@ -298,12 +318,21 @@ class ControlPanel:
             self.root.after(REFRESH_MS, self._refresh)
 
     def _refresh_inner(self):
+        now = time.time()
+        if self._speed_ref is not None and now - self._speed_ref[0] >= 1.0:
+            rate = (self.world.t - self._speed_ref[1]) / (now - self._speed_ref[0])
+            self.sim_speed_actual.set(f"actual: {rate:.1f}x" + ("" if self.world.state() == "running" else " (stopped)"))
+            self._speed_ref = None
+        if self._speed_ref is None:
+            self._speed_ref = (now, self.world.t)
         state = self.world.state()
         text, colour = STATE_TEXT[state]
         self.state_lbl.config(text=text, bg=colour)
         self.reason.set(self.world.stop_reason if state != "running" else "")
         if self.collision_status is not None:
             self.collision_status.set(self.fanuc.collision_msg)
+        if self.y_collision_status is not None:
+            self.y_collision_status.set(self.yaskawa.collision_msg)
         if self.fanuc is not None and self.jog_widgets:
             self._refresh_jog()
         if self.feed_var.get() == "manual":
@@ -346,15 +375,13 @@ class ControlPanel:
             self.joint_actual[i].config(text=f"{q[i]:+6.1f}")
 
 
-def run_panel(world, fanuc=None, safety=None):
-    """Show the control panel on the main thread. Blocks until it is closed,
-    which ends the program. Returns False if Tk is unavailable."""
+def run_panel(world, fanuc=None, safety=None, yaskawa=None):
     try:
         root = tk.Tk()
     except tk.TclError as err:
         print(f"[panel] no display for the control panel ({err}) - running without it")
         return False
-    panel = ControlPanel(root, world, fanuc)
+    panel = ControlPanel(root, world, fanuc, yaskawa)
     panel.safety = safety
     root.mainloop()
     return True

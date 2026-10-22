@@ -1,6 +1,3 @@
-"""Quick visual test of the conveyor system. Run from the Assignment 2 folder:
-    python test_conveyors.py
-"""
 import time
 import swift
 from spatialmath import SE3

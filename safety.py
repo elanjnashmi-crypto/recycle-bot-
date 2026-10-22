@@ -1,40 +1,3 @@
-"""
-Safety system for the whole recycle-bot workcell (all four robots and the belts).
-
-GUARDING
---------
-1. PERIMETER FENCE around the whole workcell, with ONE personnel gate on the
-   bottom edge (in line with the walkway between plastic_line and metal_line).
-
-2. LIGHT CURTAIN (light wall) across the gate. Breaking any beam trips the
-   cell-wide e-stop (World.estop): every robot and every belt stops. Reset is
-   refused while a beam is still blocked or while someone is still inside the
-   fence (restart interlock); the cell only restarts on a separate Resume.
-   Distance check, ISO 13855: S = K*T + C
-       K = 1.6 m/s (walking approach), T = 0.25 s (curtain response + stop),
-       C = 0.128 m (30 mm resolution: 8 * (30 - 14) mm)  ->  S = 0.53 m.
-   The nearest hazard to the gate is the UR3e: 1.47 m from the gate to its
-   base, minus its 0.50 m reach = 0.97 m > 0.53 m.
-
-3. SPEED & SEPARATION MONITORING: an area scanner watches the floor zone in
-   front of the gate. Anyone standing in it slows the WHOLE cell (every robot
-   and belt) to WARN_SPEED, before they can reach the curtain.
-
-INDICATION
-----------
-A stack light on a pole beside every robot (and one on the gate): GREEN while
-the cell is running, RED while it is stopped (e-stop, or reset but not yet
-resumed).
-
-E-STOP STATIONS: a red mushroom e-stop button beside every robot and one
-outside the gate (modelled equipment; the working e-stop is the GUI button).
-
-A simulated person (keyboard keys on the control panel) walks up to and
-through the gate to test the curtain and the speed zone.
-
-Swift cannot recolour a shape after it is added, so lamps and beams that
-change colour are drawn twice and the unused copy is parked below the floor.
-"""
 import time
 
 import numpy as np
@@ -65,9 +28,7 @@ LIGHT_POLES = {
 }
 POLE_H = 2.10
 
-# ---- e-stop stations: red mushroom buttons on yellow boxes, at hand height ----
-# One beside each robot (next to its light pole) and one OUTSIDE the gate, so an
-# operator can stop the cell without entering it.
+# ---- e-stop stations
 ESTOP_STATIONS = {
     "Kawasaki": (0.80, 4.45),
     "FANUC": (0.00, -1.20),
@@ -83,7 +44,7 @@ PERSON_STOPS = {
     "warning zone": GATE_Y - 0.45,
     "inside cell": GATE_Y + 0.55,
 }
-WALK_SPEED = 1.0               # m/s, wall-clock time (people keep walking during an e-stop)
+WALK_SPEED = 1.0
 BODY_HALF_DEPTH = 0.12         # front of the body is this far ahead of its centre
 
 PARKED = SE3(0, 0, -10)        # where hidden duplicates wait
@@ -97,8 +58,6 @@ def _dim(c):
 
 
 class Person:
-    """Simple stand-in human: legs, torso, arms, head. Origin on the floor, faces +y."""
-
     def __init__(self, env, y):
         skin, shirt, pants = (0.90, 0.72, 0.58, 1), (1.0, 0.45, 0.05, 1), (0.12, 0.16, 0.35, 1)
         self.parts = [   # (shape, offset from the person's floor origin)
@@ -210,8 +169,6 @@ class SafetySystem:
             env.add(b)
 
     def _build_stack_lights(self, env):
-        """Pole + red (top) and green lamps. Unlit lamps are always drawn; the lit
-        copies are moved into place or parked."""
         self._lamps = []                                  # (lit_shape, pose, "red"/"green")
         for x, y in LIGHT_POLES.values():
             env.add(Cylinder(0.025, POLE_H, pose=SE3(x, y, POLE_H / 2), color=DARK))
