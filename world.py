@@ -30,6 +30,7 @@ Usage from main_sim.py:
 A standalone station (python some_cell.py) needs no registration.
 """
 import threading
+import time
 
 from conveyors import ConveyorSystem
 
@@ -41,12 +42,24 @@ class World:
         self.conveyors = ConveyorSystem(env)
         self.t = 0.0
         self.running = True          # single e-stop flag for the whole workcell
+        self.auto_feed = True        # False = manual feed: the Kawasaki only picks items the GUI asks for
+        self.pick_requests = []      # manual feed: item kinds queued for the Kawasaki to pick from its tub
+        self.infeed_status = ""      # what the Kawasaki is doing, shown on the control panel
+        self.slow_factor = 1.0       # <1 slows the WHOLE cell in real time (safety speed zone)
+        self.obstacles = []          # test obstacles: dict(shape, lo, hi) axis-aligned boxes (collision avoidance)
         self.active_items = []       # shapes currently belt-driven (not held by any gripper)
         self.item_info = {}          # id(shape) -> dict(kind=..., radius=..., height=...), set by whoever spawns it
         self._cond = threading.Condition(threading.RLock())
         self._n_stations = 0         # registered stations (0 -> standalone, treated as 1)
         self._waiting = 0            # stations waiting in the current round
         self._round = 0              # round counter (lets waiters detect a finished round)
+        # e-stop state: running=False freezes every station inside tick();
+        # latched=True means it has not been reset yet (reset, THEN resume).
+        self.latched = False
+        self.stop_reason = ""
+        self._interlocks = []        # fn() -> "" if OK, else why reset/resume is refused
+        self._hooks = []             # fn() run once per round AND while e-stopped (lock held)
+        self._last_pump = 0.0
 
     # ---------- station registration ----------
     def register(self):
@@ -95,34 +108,117 @@ class World:
             if shape in self.active_items:
                 self.active_items.remove(shape)
 
+    # ---------- belt speed ----------
+    def set_belt_speed(self, speed):
+        """Set every belt's speed (m/s). Safe to call from the GUI thread."""
+        with self._cond:
+            for c in self.conveyors.conveyors:
+                c.speed = float(speed)
+
+    def belt_speed(self):
+        return self.conveyors.conveyors[0].speed
+
+    # ---------- manual feed ----------
+    def request_pick(self, kind):
+        """Manual feed: ask the Kawasaki to pick an item of this kind from its tub
+        (safe from the GUI thread; the infeed thread takes requests in order)."""
+        self.pick_requests.append(kind)
+
+    # ---------- hooks / interlocks ----------
+    def add_hook(self, fn):
+        """fn() is called with the world lock held once per round, and about
+        10x a second while e-stopped (so safety sensors, lights and spawning
+        keep working when the clock is frozen). Use it for anything that
+        touches Swift shapes from outside a station thread."""
+        with self._cond:
+            self._hooks.append(fn)
+
+    def add_interlock(self, fn):
+        """fn() returns "" when it is safe to reset/resume, or the reason it is not
+        (e.g. "light curtain still blocked")."""
+        with self._cond:
+            self._interlocks.append(fn)
+
+    def _blocked_by(self):
+        for fn in self._interlocks:
+            why = fn()
+            if why:
+                return why
+        return ""
+
     # ---------- e-stop ----------
-    def estop(self):
-        """Simulated / physical e-stop trip: halt belts and freeze the clock.
-        Station threads block inside tick() (no busy loop, no motion) until
-        reset() AND resume() have both been called. Does NOT clear on its own."""
+    def estop(self, reason="E-stop button pressed"):
+        """E-stop trip (GUI button, keyboard, light curtain...): halt belts and
+        freeze the clock. Station threads block inside tick() until reset()
+        AND resume() have both been called. It never clears on its own."""
         with self._cond:
             self.running = False
             self.conveyors.stop()
+            if not self.latched:
+                self.latched = True
+                self.stop_reason = reason
+                print(f"[{self.t:6.1f}s] *** E-STOP: {reason} ***")
 
     def reset(self):
-        """Deliberate acknowledge/reset after an e-stop. Clears the conveyor
-        fault but does not itself resume motion -- resume() is a separate
-        action, per the brief's reset-then-start requirement."""
+        """Acknowledge the e-stop. Refused while an interlock is still active
+        (e.g. someone inside the cell). Does NOT restart anything."""
         with self._cond:
-            self.conveyors.start()
+            if not self.latched:
+                return True, "Nothing to reset" if self.running else "Already reset - press Resume"
+            why = self._blocked_by()
+            if why:
+                return False, f"Reset refused: {why}"
+            self.latched = False
+            print(f"[{self.t:6.1f}s] e-stop reset ({self.stop_reason}) - waiting for Resume")
+            return True, "Reset OK - press Resume to restart"
 
     def resume(self):
-        """Separate start/resume action after reset()."""
+        """Separate start action after reset(), per the reset-then-start requirement."""
         with self._cond:
+            if self.running:
+                return True, "Already running"
+            if self.latched:
+                return False, "Reset the e-stop first"
+            why = self._blocked_by()
+            if why:
+                return False, f"Resume refused: {why}"
             self.running = True
+            self.stop_reason = ""
+            self.conveyors.start()
             self._cond.notify_all()
+            print(f"[{self.t:6.1f}s] resumed")
+            return True, "Running"
+
+    def state(self):
+        """'running' | 'estop' (latched) | 'reset' (waiting for resume)."""
+        if self.running:
+            return "running"
+        return "estop" if self.latched else "reset"
+
+    def _run_hooks(self):
+        for fn in list(self._hooks):
+            fn()
+
+    def _pump_while_stopped(self):
+        """While e-stopped nothing advances the world, but the safety hooks
+        (person walking, stack light) still need to run and Swift still needs
+        frames, so redraw ~10x a second without moving the clock. Lock held."""
+        now = time.time()
+        if now - self._last_pump < 0.1:
+            return
+        self._last_pump = now
+        self._run_hooks()
+        self.env.step(0)
 
     # ---------- stepping ----------
     def _finish_round(self):
         """Advance the world by one dt. Caller holds self._cond."""
         self.t += self.dt
+        self._run_hooks()
         self.conveyors.step(self.dt, list(self.active_items))
         self.env.step(self.dt)
+        if self.slow_factor < 1.0:   # every robot and belt advances once per round -> all slow down
+            time.sleep(self.dt * (1.0 / max(self.slow_factor, 0.05) - 1.0))
         self._waiting = 0
         self._round += 1
         self._cond.notify_all()
@@ -133,7 +229,9 @@ class World:
         (conveyors + one Swift frame) and all stations are released together."""
         with self._cond:
             while not self.running:                  # e-stopped: wait, don't spin
-                self._cond.wait(0.1)
+                self._cond.wait(0.05)
+                if not self.running:
+                    self._pump_while_stopped()
             self._waiting += 1
             my_round = self._round
             if self._waiting >= max(1, self._n_stations):
