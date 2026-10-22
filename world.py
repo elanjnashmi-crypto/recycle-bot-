@@ -1,7 +1,44 @@
+import os
+import sys
 import threading
 import time
 
+import swift
+
 from conveyors import ConveyorSystem
+
+
+def _one_swift_tab():
+    """Swift sends every message through one queue shared by all connected browser
+    tabs, and it always reuses the same port. A second tab (a refresh, or an old Swift
+    tab the browser reloads) splits the messages between tabs, so shapes get the wrong
+    ids and are drawn in the wrong places. Only the first tab is allowed to connect."""
+    route = sys.modules.get("swift.SwiftRoute")
+    if route is None or getattr(route.SwiftSocket, "_one_tab", False):
+        return
+    serve = route.SwiftSocket.serve
+
+    async def one_tab_serve(self, websocket, path=None):
+        if getattr(self, "_client", None) is not None:
+            print("[world] a second Swift tab tried to connect - closed it (keep only the first tab)")
+            await websocket.close()
+            return
+        self._client = websocket
+        try:
+            return await serve(self, websocket, path)
+        except Exception:
+            pass
+        finally:
+            # The Swift tab was closed: nothing can be drawn any more, so stop the
+            # whole program instead of leaving every station stuck waiting for it.
+            print("[world] Swift window closed - simulation stopped.", flush=True)
+            os._exit(0)
+
+    route.SwiftSocket.serve = one_tab_serve
+    route.SwiftSocket._one_tab = True
+
+
+_one_swift_tab()
 
 
 class World:
