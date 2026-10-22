@@ -117,6 +117,15 @@ def main():
 
     signal.signal(signal.SIGINT, lambda *_: os._exit(0))
 
+    # Physical e-stop button (Arduino on a USB serial port).
+    try:
+        from estop_button import EstopButton
+        button = EstopButton(on_estop=lambda why: world.estop(f"Physical e-stop button ({why})"))
+        button.start()
+        world.add_interlock(button.interlock)
+    except ImportError as err:
+        print(f"[main] physical e-stop button disabled ({err}). pip install pyserial to enable it.")
+
     # Control panel on the main thread (Tk needs it on macOS)
     threading.Thread(target=watchdog, args=(world, threads), daemon=True, name="watchdog").start()
     from control_panel import run_panel
