@@ -94,6 +94,12 @@ def main():
     except TypeError:                 # older Swift without that option
         env.launch(realtime=True)
     world = World(env, dt=DT)
+    try:
+        from factory import build_factory
+        build_factory(env)                # warehouse building around the cell (static)
+    except Exception:
+        print("[main] factory building failed to build:")
+        traceback.print_exc()
 
     stations = build_stations(world)
     if not stations:
