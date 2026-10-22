@@ -102,21 +102,15 @@ def main():
 
     for _ in stations:
         world.register()              # all registered BEFORE any thread starts, so rounds wait for everyone
-    # Safety (light curtain, speed zone, stack light) and the item spawner are
-    # added before any station thread starts, so they can still touch Swift directly.
+    # Safety (fence, light curtain, speed zone, stack lights) is added before any
+    # station thread starts, so it can still touch Swift directly.
     fanuc = next((s for s in stations if type(s).__name__ == "ClassifyCell"), None)
-    safety = spawner = None
+    safety = None
     try:
         from safety import SafetySystem
         safety = SafetySystem(world, fanuc)
     except Exception:
         print("[main] safety system failed to build:")
-        traceback.print_exc()
-    try:
-        from item_spawner import ItemSpawner
-        spawner = ItemSpawner(world)
-    except Exception:
-        print("[main] item spawner failed to build:")
         traceback.print_exc()
 
     threads = [threading.Thread(target=run_station, args=(s, world), daemon=True,
@@ -131,7 +125,7 @@ def main():
     # moves to a background thread. Without a display, fall back to the old loop.
     threading.Thread(target=watchdog, args=(world, threads), daemon=True, name="watchdog").start()
     from control_panel import run_panel
-    if not run_panel(world, fanuc, safety, spawner):
+    if not run_panel(world, fanuc, safety):
         for t in threads:
             t.join()
 

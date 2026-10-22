@@ -134,8 +134,8 @@ class GeneralBin:
                 break
         return x, y
 
-    def spawn_item(self, world, placed=()):
-        kind = self._next_kind()
+    def spawn_item(self, world, placed=(), kind=None):
+        kind = kind or self._next_kind()
         spec = RUBBISH_ITEMS[kind]
         r, h = spec["radius"], spec["height"]
         x, y = self._random_point(r, placed)
@@ -333,11 +333,27 @@ class InfeedCell:
         self._line((px, py, place_hover), stage, pyaw)      # back out the way we came in
         self._move_joint(self.q_wait)
 
+    def _manual_pick(self):
+        """Manual feed: pick the next requested kind from the tub. If none of that
+        kind is in the tub, one is added to it first."""
+        requests = getattr(self.world, "pick_requests", [])
+        if not requests:
+            self.world.infeed_status = "Manual: waiting for you to choose an item"
+            self.step()
+            return
+        kind = requests.pop(0)
+        item = next((it for it in self.items_in_bin if it.kind == kind), None)
+        if item is None:
+            item = self.bin.spawn_item(self.world, self.items_in_bin, kind=kind)
+            self.items_in_bin.append(item)
+        self.world.infeed_status = f"Kawasaki picking {kind}"
+        self.pick_and_place(item)
+
     def run(self):
         self._move_joint(self.q_wait)
         while True:
-            if not getattr(self.world, "auto_feed", True):   # manual spawning: wait, don't feed
-                self.step()
+            if not getattr(self.world, "auto_feed", True):   # manual feed: only pick what the GUI asks for
+                self._manual_pick()
                 continue
             if not self.items_in_bin:
                 self._refill()
