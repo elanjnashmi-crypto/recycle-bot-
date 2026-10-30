@@ -14,10 +14,10 @@ from item_meshes import BOTTLE_HEIGHT, BOTTLE_RADIUS, ITEM_MESHES, ensure_mesh
 
 DT = 0.05
 
-# ---- station layout -------------------------------------------------
-BIN_XY = (-0.90, 3.60)                 # general rubbish tub, upstream of main_line start
-BIN_SIZE = (0.55, 0.55, 0.30)          # open-top tub footprint + depth
-BIN_FLOOR_Z = 0.10                     # tub sits on the floor, rim well below belt height
+
+BIN_XY = (-0.90, 3.60) # general rubbish tub
+BIN_SIZE = (0.55, 0.55, 0.30) 
+BIN_FLOOR_Z = 0.10  # tub sits on the floor rim well below belt height
 
 PEDESTAL_HEIGHT = 0.30
 PEDESTAL_SIZE = 0.36
@@ -25,20 +25,20 @@ KAWASAKI_BASE = SE3(-0.30, 3.90, PEDESTAL_HEIGHT)  # behind the bin, facing the 
 MAX_PICK_RADIUS = 0.85
 PLACE_XY = LAYOUT["main_line"][0]
 
-# parallel-jaw gripper on the flange (same layout as the FANUC's)
+# parallel-jaw gripper on the flange 
 PALM_LEN = 0.05
 FINGER_LEN = 0.05
 FINGER_THICK = 0.012
-FINGER_OPEN = 0.055                    # half-gap between the fingers when open
-GRIP_TIME = 0.4                        # s to open / close
-HOVER = 0.10                           # height above grasp/place height for approach moves
-BIN_RIM_Z = BIN_FLOOR_Z + BIN_SIZE[2]  # top of the tub wall
+FINGER_OPEN = 0.055                    
+GRIP_TIME = 0.4                        
+HOVER = 0.10                           
+BIN_RIM_Z = BIN_FLOOR_Z + BIN_SIZE[2]  
 CLEAR_RIM = 0.06
 STAGE_BACK = 0.25
-WAIT_Z = 0.95                          # flange height of the waiting pose over the tub
-JOINT_SPEED = 0.8                      # rad/s, peak, for joint-space moves
-LINE_SPEED = 0.15                      # m/s, straight-line lower / lift
-TRANSIT_SPEED = 0.30                   # m/s, longer straight-line carry between tub and belt
+WAIT_Z = 0.95                          
+JOINT_SPEED = 0.8                      
+LINE_SPEED = 0.15                      
+TRANSIT_SPEED = 0.30                   
 
 # The four kinds of rubbish in the tub.
 CAN_RADIUS, CAN_HEIGHT = 0.033, 0.122          # both metal cans are the SAME size
@@ -62,9 +62,9 @@ RUBBISH_ITEMS = {
 class Item:
     shape: object
     kind: str
-    radius: float   # half-extent for boxes too, kept simple
+    radius: float   
     height: float
-    grip_radius: float = 0.03   # half-gap the gripper fingers close to
+    grip_radius: float = 0.03   
 
     @property
     def pos(self):
@@ -83,7 +83,7 @@ class GeneralBin:
         self._bag = []
         self._build(env)
 
-    def _next_kind(self):
+    def _next_kind(self): #every 4 spawns have 1 of each item
         if not self._bag:
             self._bag = [str(k) for k in self.rng.permutation(list(RUBBISH_ITEMS))]
         return self._bag.pop()
@@ -138,14 +138,14 @@ class InfeedCell:
         self.env = world.env
         self.bin = GeneralBin(self.env, BIN_XY)
 
-        # Low pedestal
+        
         px, py = KAWASAKI_BASE.t[0], KAWASAKI_BASE.t[1]
         self.env.add(Cuboid([PEDESTAL_SIZE, PEDESTAL_SIZE, PEDESTAL_HEIGHT],
                             pose=SE3(px, py, PEDESTAL_HEIGHT / 2), color=(0.35, 0.35, 0.38, 1)))
         self.robot = robot if robot is not None else RS007L(base=KAWASAKI_BASE)
         if hasattr(self.robot, "add_to_env"):
             self.robot.add_to_env(self.env)
-        # Parallel-jaw gripper on the flange.
+        
         self.palm = Cuboid([0.04, 0.11, PALM_LEN], color=(0.15, 0.15, 0.15, 1))
         self.fingers = [Cuboid([0.025, FINGER_THICK, FINGER_LEN], color=(0.75, 0.75, 0.78, 1))
                         for _ in range(2)]
@@ -174,7 +174,7 @@ class InfeedCell:
         return float(np.arctan2(y - b[1], x - b[0]))
 
     def _down_pose(self, x, y, z, yaw):
-        return SE3(x, y, z) * SE3.Rz(yaw) * SE3.Rx(pi)   # tool z pointing down
+        return SE3(x, y, z) * SE3.Rz(yaw) * SE3.Rx(pi)   # fix tool to point downwards
 
     def _home_q(self):
         return np.array([self._yaw_to(*BIN_XY), -pi / 4, -pi / 4, 0.0, -pi / 2, 0.0])
@@ -199,14 +199,14 @@ class InfeedCell:
             d = float(np.abs(q - q_seed).sum())
             if d < best_d:
                 best, best_d = q, d
-            if d < 0.4:                       # close to where we are: take it
+            if d < 0.4:  # close to where we are: take it
                 break
         if best is None:
             p = np.round(T.t, 2)
             raise RuntimeError(f"Kawasaki cannot reach {p} (out of reach or joint limits)")
         return best
 
-    # ---------- world ----------
+    
     def _update_tool(self):
         T = self.robot.fkine(self.robot.q)
         self.palm.T = (T * SE3(0, 0, PALM_LEN / 2)).A
@@ -248,13 +248,13 @@ class InfeedCell:
             self._set_q(q)
             self.step()
 
-    # ---------- behaviour ----------
+
     def pick_and_place(self, item):
         x, y = float(item.pos[0]), float(item.pos[1])
         yaw = self._yaw_to(x, y)
         h = item.height
         top_z = BIN_FLOOR_Z + GeneralBin.WALL + h
-        grasp_z = top_z + PALM_LEN                                   # palm underside touches the item top
+        grasp_z = top_z + PALM_LEN     # palm underside touches the item top
         hover_z = grasp_z + HOVER
         travel_z = max(hover_z, BIN_RIM_Z + CLEAR_RIM + h + PALM_LEN)  # item bottom clears the tub rim
 
@@ -302,7 +302,7 @@ class InfeedCell:
         try:
             if reqs:
                 kind = reqs.popleft() if hasattr(reqs, "popleft") else reqs.pop(0)
-        except IndexError:                        # the panel cleared the queue just now
+        except IndexError:  
             kind = None
         if kind is None:
             return None
