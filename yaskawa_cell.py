@@ -32,6 +32,8 @@ DEFAULT_RADIUS, DEFAULT_HEIGHT, DEFAULT_MASS_KG = 0.033, 0.122, 0.055
 # ---- camera: the same OverheadCamera as the FANUC, watching the end of metal_return ----
 CAM_WINDOW = 0.60                       # m of belt before the end stop the camera can see
 STOPPED_SPEED = 0.04                    # m/s, item counts as stopped below this (belt runs 0.15)
+CAMERA_POS = (2.50, 1.45, 2.00)         # m, camera body above the end of metal_return, looking down
+CAMERA_POLE_XY = (2.95, 1.45)           # pole beside the belt, outside the GP7's reach
 
 # ---- visual servoing + RMRC (the final descent onto the item) -----------------
 KP_XY = 8.0                             # 1/s, gain on the camera's gripper-to-item position error
@@ -139,6 +141,7 @@ class SortingCell:
         self.load_cell = LoadCell()
         stop = self.belt.length - 0.1                     # where the end stop holds items
         self.camera = OverheadCamera(world, self.belt, stop - CAM_WINDOW, stop + 0.05)
+        self.camera.add_model(self.env, CAMERA_POS, CAMERA_POLE_XY)
         self.s_stop = stop
         self.ready = []                     # shapes the camera has seen stopped at the end stop
 
