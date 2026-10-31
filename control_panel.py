@@ -8,12 +8,12 @@ import numpy as np
 try:
     from infeed_cell import RUBBISH_ITEMS
     ITEM_KINDS = list(RUBBISH_ITEMS)
-except Exception:                   # infeed failed to import: manual feed has nothing to offer
+except Exception:   # infeed failed to import:
     ITEM_KINDS = []
 
-REFRESH_MS = 100
+REFRESH_MS = 100 #refresh rate of the control panel (10hz)
 SIM_SPEED_RANGE = (0.5, 5.0)       # x real time
-BELT_SPEED_RANGE = (0.05, 0.25)    # m/s; above ~0.25 the FANUC can't catch items in its reach
+BELT_SPEED_RANGE = (0.05, 0.25)    # m/s, above 0.25 the FANUC can't catch items in its reach
 MODE_TEXT = {"auto": "AUTO", "manual": "MANUAL", "to_auto": "returning to auto..."}
 STATE_TEXT = {
     "running": ("RUNNING", "#1b8a2e"),
@@ -29,7 +29,7 @@ class ControlPanel:
         root.resizable(False, False)
         root.protocol("WM_DELETE_WINDOW", lambda: os._exit(0))
         root.bind("<Escape>", lambda e: self._estop())
-        self.safety = None              # set by run_panel; keys 1/2/3 move the test person
+        self.safety = None # set by run_panel; keys 1/2/3 move the test person to different statess
         for key, where in (("1", "outside"), ("2", "warning zone"), ("3", "inside cell")):
             root.bind(key, lambda e, w=where: self._person(w))
 
@@ -246,7 +246,7 @@ class ControlPanel:
         if self.fanuc.mode != "manual":
             return
         if self._last_set[i] is not None and abs(value - self._last_set[i]) < 0.26:
-            return                      # our own refresh moved the slider, not the user
+            return      
         self._last_set[i] = value
         self.fanuc.jog_joint(i, np.radians(value))
 

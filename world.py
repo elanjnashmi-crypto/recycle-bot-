@@ -9,11 +9,7 @@ from conveyors import ConveyorSystem
 
 
 def _one_swift_tab():
-    """Swift sends every message through one queue shared by all connected browser
-    tabs, and it always reuses the same port. A second tab (a refresh, or an old Swift
-    tab the browser reloads) splits the messages between tabs, so shapes get the wrong
-    ids and are drawn in the wrong places. Only the first tab is allowed to connect."""
-    route = sys.modules.get("swift.SwiftRoute")
+
     if route is None or getattr(route.SwiftSocket, "_one_tab", False):
         return
     serve = route.SwiftSocket.serve
@@ -29,8 +25,6 @@ def _one_swift_tab():
         except Exception:
             pass
         finally:
-            # The Swift tab was closed: nothing can be drawn any more, so stop the
-            # whole program instead of leaving every station stuck waiting for it.
             print("[world] Swift window closed - simulation stopped.", flush=True)
             os._exit(0)
 
@@ -47,35 +41,34 @@ class World:
         self.dt = dt
         self.conveyors = ConveyorSystem(env)
         self.t = 0.0
-        self.running = True          # single e-stop flag for the whole workcell
+        self.running = True #single e-stop flag for the whole workcell
         self.auto_feed = True
         self.pick_requests = []
         self.infeed_status = ""      # what the Kawasaki is doing, shown on the control panel
-        self.slow_factor = 1.0       # <1 slows the WHOLE cell in real time (safety speed zone)
-        self.sim_speed = 1.0         # GUI simulation speed: 1 = real time, 5 = five times faster
-        self._pace_wall = None       # wall clock / sim time the pacing is measured from
+        self.slow_factor = 1.0       #<1 slows the WHOLE cell in real time (standing in front of light barrier)
+        self.sim_speed = 1.0         # GUI simulation speed setter, 1 = real time, 5 = speed*5
+        self._pace_wall = None       # wall clock /sim time the pacing is measured from
         self._pace_sim = 0.0
         self._pace_speed = 1.0
-        # World paces the clock itself (below), so Swift must not also sleep in
-        # env.step(). It then just skips frames above 30 fps when running fast.
+        # World paces the clock itself
         if not getattr(env, "headless", False):
             env.realtime = False
             env.rate = 30
         self.obstacles = []
-        self.active_items = []       # shapes currently belt-driven (not held by any gripper)
+        self.active_items = [] #shapes currently on conveyors, used to detect collisions with the robot
         self.item_info = {}
         self._cond = threading.Condition(threading.RLock())
-        self._n_stations = 0         # registered stations (0 -> standalone, treated as 1)
-        self._waiting = 0            # stations waiting in the current round
-        self._round = 0              # round counter (lets waiters detect a finished round)
+        self._n_stations = 0         
+        self._waiting = 0            
+        self._round = 0              
         # e-stop state
         self.latched = False
         self.stop_reason = ""
-        self._interlocks = []        # fn() -> "" if OK, else why reset/resume is refused
-        self._hooks = []             # fn() run once per round AND while e-stopped (lock held)
+        self._interlocks = []   
+        self._hooks = []   #run once per round AND while e-stopped (lock held)
         self._last_pump = 0.0
 
-    # ---------- station registration ----------
+    
     def register(self):
         with self._cond:
             self._n_stations += 1
@@ -87,18 +80,18 @@ class World:
                 self._finish_round()
             self._cond.notify_all()
 
-    # ---------- thread-safe Swift access ----------
+    
     def add(self, shape):
         with self._cond:
             self.env.add(shape)
 
-    # ---------- item registry ----------
+    
     def tag_item(self, shape, **info):
         with self._cond:
             self.item_info[id(shape)] = dict(info)
 
     def get_item_info(self, shape):
-        """What the spawner recorded for this item, or None if it was never tagged."""
+        # what the spawner knows about the item
         with self._cond:
             return self.item_info.get(id(shape))
 
@@ -112,26 +105,25 @@ class World:
             if shape in self.active_items:
                 self.active_items.remove(shape)
 
-    # ---------- belt speed ----------
+    #conveyors speed
     def set_belt_speed(self, speed):
-        """Set every belt's speed (m/s). Safe to call from the GUI thread."""
         with self._cond:
             for c in self.conveyors.conveyors:
                 c.speed = float(speed)
 
     def set_sim_speed(self, speed):
-        """Run the whole simulation `speed` times faster than real time."""
+        #sim speed setter to allow the GUI to change the speed of the simulation
         with self._cond:
             self.sim_speed = max(0.1, float(speed))
 
     def belt_speed(self):
         return self.conveyors.conveyors[0].speed
 
-    # ---------- manual feed ----------
+    #manual item spawning
     def request_pick(self, kind):
         self.pick_requests.append(kind)
 
-    # ---------- hooks / interlocks ----------
+    
     def add_hook(self, fn):
         with self._cond:
             self._hooks.append(fn)
@@ -147,7 +139,7 @@ class World:
                 return why
         return ""
 
-    # ---------- e-stop ----------
+    
     def estop(self, reason="E-stop button pressed"):
         with self._cond:
             self.running = False
@@ -169,7 +161,7 @@ class World:
             return True, "Reset OK - press Resume to restart"
 
     def resume(self):
-        """Separate start action after reset(), per the reset-then-start requirement."""
+        #seperate from reset, so that a station can refuse to resume if it is not ready yet
         with self._cond:
             if self.running:
                 return True, "Already running"
@@ -186,7 +178,7 @@ class World:
             return True, "Running"
 
     def state(self):
-        """'running' | 'estop' (latched) | 'reset' (waiting for resume)."""
+        #running, estop, reset, resume
         if self.running:
             return "running"
         return "estop" if self.latched else "reset"
@@ -203,7 +195,7 @@ class World:
         self._run_hooks()
         self.env.step(0)
 
-    # ---------- stepping ----------
+    
     def _finish_round(self):
         """Advance the world by one dt. Caller holds self._cond."""
         self.t += self.dt
@@ -216,7 +208,7 @@ class World:
         self._cond.notify_all()
 
     def _pace(self):
-        """Sleep so sim time runs at sim_speed x slow_factor times wall time."""
+        # pace the simulation wall clock to match the sim time, scaled by self.sim_speed * self.slow_factor
         if getattr(self.env, "headless", False):
             return
         speed = self.sim_speed * max(self.slow_factor, 0.05)
@@ -227,12 +219,12 @@ class World:
         target = self._pace_wall + (self.t - self._pace_sim) / speed
         if target > now:
             time.sleep(target - now)
-        elif now - target > 0.25:                # can't keep up: don't try to catch up later
+        elif now - target > 0.25:                
             self._pace_wall, self._pace_sim = now, self.t
 
     def tick(self):
         with self._cond:
-            while not self.running:                  # e-stopped: wait, don't spin
+            while not self.running: # e-stopped dont spin
                 self._cond.wait(0.05)
                 if not self.running:
                     self._pump_while_stopped()
@@ -242,6 +234,6 @@ class World:
                 self._finish_round()
                 return
             while self._round == my_round:
-                self._cond.wait(0.5)                 # timeout so a stalled round can't hang forever
+                self._cond.wait(0.5)                 
                 if self._round == my_round and self._waiting >= max(1, self._n_stations):
                     self._finish_round()
